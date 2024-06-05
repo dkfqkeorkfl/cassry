@@ -27,7 +27,6 @@ pub use float::*;
 pub use cache::*;
 pub use leveldb::*;
 pub use types::*;
-pub use rust_decimal_macros::*;
 pub use log::Level as LogLvl;
 // pub use rust_decimal::Decimal;
 
