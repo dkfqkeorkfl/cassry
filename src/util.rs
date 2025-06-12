@@ -2,6 +2,7 @@ use argon2::{PasswordHasher, PasswordVerifier};
 use chrono::{DateTime, TimeZone, Utc};
 use futures::Future;
 use ring::aead;
+use secrecy::ExposeSecret;
 use serde::{Deserialize, Serialize};
 use std::cmp::Ordering;
 
@@ -51,7 +52,7 @@ struct GoogleClaims {
 pub async fn req_access_token_for_google_service_account(
     account_json: &str,
     exp: i64,
-) -> anyhow::Result<String> {
+) -> anyhow::Result<secrecy::SecretString> {
     let key_data: serde_json::Value = serde_json::from_str(account_json)?;
 
     let private_key = key_data["private_key"]
@@ -168,7 +169,7 @@ pub struct EncryptedData {
     tag: String,
 }
 
-pub fn decrypt_aes_gcm_128(key: &str, iv: &str, data: EncryptedData) -> anyhow::Result<String> {
+pub fn decrypt_aes_gcm_128(key: &str, iv: &str, data: EncryptedData) -> anyhow::Result<secrecy::SecretString> {
     let key_bytes = hex::decode(key)?;
     let nonce_bytes = hex::decode(iv)?;
     let ciphertext_bytes = hex::decode(data.cipher)?;
@@ -188,7 +189,7 @@ pub fn decrypt_aes_gcm_128(key: &str, iv: &str, data: EncryptedData) -> anyhow::
 
     // 이제 in_out 벡터의 처음부터 암호화된 데이터의 길이까지가 복호화된 데이터입니다.
     let decrypted = String::from_utf8_lossy(&in_out[..ciphertext_bytes.len()]);
-    Ok(decrypted.to_string())
+    Ok(decrypted.into_owned().into())
 }
 
 pub fn encrypt_aes_gcm_128(key: &str, iv: &str, plaintext: &str) -> anyhow::Result<EncryptedData> {

@@ -13,6 +13,8 @@ pub use ring;
 pub use argon2;
 pub use rust_decimal;
 pub use regex;
+pub use secrecy;
+pub use zeroize;
 
 pub mod cache;
 pub mod json;
@@ -22,6 +24,8 @@ pub mod types;
 pub mod util;
 pub mod float;
 pub mod timelimiter;
+pub mod secret_loader;
+
 
 pub use float::*;
 pub use cache::*;
