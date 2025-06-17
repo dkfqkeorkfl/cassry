@@ -1,8 +1,7 @@
-use argon2::{PasswordHasher, PasswordVerifier};
+use argon2::{password_hash::rand_core, PasswordHasher, PasswordVerifier};
 use chrono::{DateTime, TimeZone, Utc};
 use futures::Future;
 use ring::aead;
-use secrecy::ExposeSecret;
 use serde::{Deserialize, Serialize};
 use std::cmp::Ordering;
 
@@ -151,9 +150,9 @@ pub fn verify_password(origin: &str, hashed: &str) -> anyhow::Result<()> {
     Ok(ret)
 }
 
-pub fn hash_password(data: &str, salt: &str) -> anyhow::Result<String> {
-    let ss = argon2::password_hash::SaltString::from_b64(salt)
-        .map_err(|e| crate::anyhowln!("{}", e.to_string()))?;
+pub fn hash_password(data: &str) -> anyhow::Result<String> {
+    let rng = rand_core::OsRng;
+    let ss = argon2::password_hash::SaltString::generate(rng);
 
     let argon = argon2::Argon2::default();
     let hash = argon

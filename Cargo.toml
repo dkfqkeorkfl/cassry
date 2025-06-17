@@ -41,5 +41,7 @@ jsonwebtoken = "9.3.1"
 rocksdb = { version = "0.23.0", features = ["multi-threaded-cf"] }
 ring = "0.17.14"
 argon2 = "0.5.3"
+
 secrecy = "0.10.3"      # 최신 버전 확인 필요
 zeroize = "1.8.1"
+redis = { version = "0.32.0", features = ["tokio-comp", "cluster", "connection-manager"] }
