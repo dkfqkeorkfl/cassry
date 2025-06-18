@@ -2,7 +2,7 @@ use chrono::{DateTime, Duration, TimeZone, Utc};
 use std::sync::Arc;
 use tokio::sync::RwLock;
 
-use super::leveldb::Leveldb;
+use super::localdb::LocalDB;
 
 /// TTL을 기반으로 적절한 폴더명을 생성합니다.
 /// TTL은 반드시 86400초(24시간)의 약수여야 합니다.
@@ -48,17 +48,17 @@ struct TimeWindowDBInner {
     ttl: Duration,
     delete_legacy: bool,
 
-    current_db: Arc<Leveldb>,
-    previous_db: Option<Arc<Leveldb>>,
+    current_db: Arc<LocalDB>,
+    previous_db: Option<Arc<LocalDB>>,
     created: chrono::DateTime<Utc>,
 }
 
 impl TimeWindowDBInner {
-    fn new(base_path: &str, ttl: Duration, delete_legacy: bool) -> anyhow::Result<Self> {
+    async fn new(base_path: &str, ttl: Duration, delete_legacy: bool) -> anyhow::Result<Self> {
         let current_time = Utc::now();
 
         let db_path = get_folder_name(base_path, &ttl, &current_time)?;
-        let current_db = Arc::new(Leveldb::new(db_path)?);
+        let current_db = Arc::new(LocalDB::new(db_path).await?);
 
         Ok(Self {
             path: base_path.to_string(),
@@ -74,14 +74,14 @@ impl TimeWindowDBInner {
         (Utc::now() - self.created) >= self.ttl
     }
 
-    fn rotate_db(&mut self) -> anyhow::Result<()> {
+    async fn rotate_db(&mut self) -> anyhow::Result<()> {
         if !self.should_rotate() {
             return Ok(());
         }
 
         let current_time = Utc::now();
         let new_db_path = get_folder_name(&self.path, &self.ttl, &current_time)?;
-        let new_db = Arc::new(Leveldb::new(new_db_path)?);
+        let new_db = Arc::new(LocalDB::new(new_db_path).await?);
         
         // Handle old DB
         if let Some(old_db) = self.previous_db.take() {
@@ -100,21 +100,21 @@ impl TimeWindowDBInner {
         Ok(())
     }
 
-    fn put(&mut self, key: &str, value: &str) -> anyhow::Result<()> {
+    async fn put(&mut self, key: String, value: String) -> anyhow::Result<()> {
         if self.should_rotate() {
-            self.rotate_db()?;
+            self.rotate_db().await?;
         }
-        self.current_db.put(key, value)
+        self.current_db.put(key, value).await
     }
 
-    fn get(&self, key: &str) -> anyhow::Result<Option<String>> {
+    async fn get(&self, key: String) -> anyhow::Result<Option<String>> {
         // Try current DB first
-        match self.current_db.get(key)? {
+        match self.current_db.get(key.clone()).await? {
             Some(value) => Ok(Some(value)),
             None => {
                 // If not found in current DB, try previous DB
                 if let Some(prev_db) = &self.previous_db {
-                    prev_db.get(key)
+                    prev_db.get(key).await
                 } else {
                     Ok(None)
                 }
@@ -122,23 +122,23 @@ impl TimeWindowDBInner {
         }
     }
 
-    fn delete(&mut self, key: &str) -> anyhow::Result<()> {
+    async fn delete(&mut self, key: String) -> anyhow::Result<()> {
         if self.should_rotate() {
-            self.rotate_db()?;
+            self.rotate_db().await?;
         }
 
         // Delete from both current and previous DB
-        self.current_db.delete(key)?;
+        self.current_db.delete(key.clone()).await?;
         if let Some(prev_db) = &self.previous_db {
-            prev_db.delete(key)?;
+            prev_db.delete(key).await?;
         }
         Ok(())
     }
 
-    fn flush(&self) -> anyhow::Result<()> {
-        self.current_db.flush()?;
+    async fn flush(&self) -> anyhow::Result<()> {
+        self.current_db.flush().await?;
         if let Some(prev_db) = &self.previous_db {
-            prev_db.flush()?;
+            prev_db.flush().await?;
         }
         Ok(())
     }
@@ -151,38 +151,30 @@ pub struct TimeWindowDB {
 }
 
 impl TimeWindowDB {
-    pub fn new(base_path: &str, ttl: Duration, delete_legacy: bool) -> anyhow::Result<Self> {
-        let inner = TimeWindowDBInner::new(base_path, ttl, delete_legacy)?;
+    pub async fn new(base_path: &str, ttl: Duration, delete_legacy: bool) -> anyhow::Result<Self> {
+        let inner = TimeWindowDBInner::new(base_path, ttl, delete_legacy).await?;
         Ok(Self {
             inner: Arc::new(RwLock::new(inner)),
         })
     }
 
-    pub async fn put(&self, key: &str, value: &str) -> anyhow::Result<()> {
+    pub async fn put(&self, key: String, value: String) -> anyhow::Result<()> {
         let mut inner = self.inner.write().await;
-        inner.put(key, value)
+        inner.put(key, value).await
     }
 
-    pub async fn get(&self, key: &str) -> anyhow::Result<Option<String>> {
+    pub async fn get(&self, key: String) -> anyhow::Result<Option<String>> {
         let inner = self.inner.read().await;
-        inner.get(key)
+        inner.get(key).await
     }
 
-    pub async fn delete(&self, key: &str) -> anyhow::Result<()> {
+    pub async fn delete(&self, key: String) -> anyhow::Result<()> {
         let mut inner = self.inner.write().await;
-        inner.delete(key)
+        inner.delete(key).await
     }
 
     pub async fn flush(&self) -> anyhow::Result<()> {
         let inner = self.inner.read().await;
-        inner.flush()
-    }
-}
-
-impl Drop for TimeWindowDBInner {
-    fn drop(&mut self) {
-        if let Err(e) = self.flush() {
-            eprintln!("Error flushing database: {}", e);
-        }
+        inner.flush().await
     }
 }

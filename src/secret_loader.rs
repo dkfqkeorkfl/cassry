@@ -1,4 +1,6 @@
 use std::collections::HashMap;
+
+#[allow(unused_imports)]
 use secrecy::{SecretString, ExposeSecret};
 
 /// Parses a string into a HashMap of SecretStrings

@@ -20,7 +20,7 @@ pub use zeroize;
 
 pub mod cache;
 pub mod json;
-pub mod leveldb;
+pub mod localdb;
 pub mod slack;
 pub mod types;
 pub mod util;
@@ -32,7 +32,7 @@ pub mod twdb;
 
 pub use float::*;
 pub use cache::*;
-pub use leveldb::*;
+pub use localdb::*;
 pub use types::*;
 pub use log::Level as LogLvl;
 // pub use rust_decimal::Decimal;

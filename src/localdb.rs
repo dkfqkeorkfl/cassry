@@ -1,9 +1,10 @@
 use rocksdb::{
-    BlockBasedOptions, Cache, DBCompressionType, DBWithThreadMode,
-    MultiThreaded, Options, ReadOptions, WriteOptions, WriteBatch,
+    BlockBasedOptions, Cache, DBCompressionType, DBWithThreadMode, MultiThreaded, Options,
+    ReadOptions, WriteBatch, WriteOptions,
 };
 use serde::{Deserialize, Serialize};
 use std::{path::Path, sync::Arc};
+use tokio::task;
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct DBStats {
@@ -19,31 +20,27 @@ pub struct DBStats {
     pub pending_compaction_bytes: u64,
 }
 
-#[derive(Clone)]
-pub struct Leveldb {
-    db: Arc<DBWithThreadMode<MultiThreaded>>,
-    write_opts: Arc<WriteOptions>,
-    read_opts: Arc<ReadOptions>,
+/// 내부 블로킹 구현체
+struct LocalDBInner {
+    db: DBWithThreadMode<MultiThreaded>,
+    write_opts: WriteOptions,
+    read_opts: ReadOptions,
     path: String,
 }
 
 /// 트랜잭션을 위한 래퍼 구조체 (WriteBatch 기반)
 pub struct TransactionWrapper {
     batch: WriteBatch,
-    db: Arc<DBWithThreadMode<MultiThreaded>>,
-    write_opts: Arc<WriteOptions>,
-    read_opts: Arc<ReadOptions>,
+    inner: Arc<LocalDBInner>,
     pending_operations: Vec<(String, String)>, // key, value pairs for JSON operations
 }
 
 impl TransactionWrapper {
     /// 새로운 트랜잭션을 생성합니다.
-    pub fn new(db: Arc<DBWithThreadMode<MultiThreaded>>, write_opts: Arc<WriteOptions>, read_opts: Arc<ReadOptions>) -> Self {
+    pub(self) fn new(inner: Arc<LocalDBInner>) -> Self {
         Self {
             batch: WriteBatch::default(),
-            db,
-            write_opts,
-            read_opts,
+            inner,
             pending_operations: Vec::new(),
         }
     }
@@ -65,19 +62,24 @@ impl TransactionWrapper {
     }
 
     /// 트랜잭션 내에서 키로 값을 조회합니다.
-    pub fn get(&self, key: &str) -> anyhow::Result<Option<String>> {
-        Ok(self
-            .db
-            .get_opt(key.as_bytes(), &self.read_opts)?
-            .map(|bytes| String::from_utf8_lossy(&bytes).to_string()))
+    pub async fn get(&self, key: String) -> anyhow::Result<Option<String>> {
+        let inner = self.inner.clone();
+
+        task::spawn_blocking(move || {
+            Ok(inner
+                .db
+                .get_opt(key.as_bytes(), &inner.read_opts)?
+                .map(|bytes| String::from_utf8_lossy(&bytes).to_string()))
+        })
+        .await?
     }
 
     /// 트랜잭션 내에서 JSON 객체를 조회합니다.
-    pub fn get_json<T>(&self, key: &str) -> anyhow::Result<Option<T>>
+    pub async fn get_json<T>(&self, key: String) -> anyhow::Result<Option<T>>
     where
         T: for<'de> Deserialize<'de>,
     {
-        match self.get(key)? {
+        match self.get(key).await? {
             Some(json_str) => {
                 let value = serde_json::from_str(&json_str)?;
                 Ok(Some(value))
@@ -93,20 +95,28 @@ impl TransactionWrapper {
     }
 
     /// 트랜잭션을 커밋합니다.
-    pub fn commit(mut self) -> anyhow::Result<()> {
+    pub async fn commit(mut self) -> anyhow::Result<()> {
         // 먼저 pending JSON operations를 batch에 추가
         for (key, value) in self.pending_operations {
             self.batch.put(key.as_bytes(), value.as_bytes());
         }
-        
+
+        let inner = self.inner.clone();
+        let batch = self.batch;
+
         // WriteBatch를 데이터베이스에 적용
-        self.db.write_opt(self.batch, &self.write_opts)
-            .map_err(anyhow::Error::from)
+        task::spawn_blocking(move || {
+            inner
+                .db
+                .write_opt(batch, &inner.write_opts)
+                .map_err(anyhow::Error::from)
+        })
+        .await?
     }
 }
 
-impl Leveldb {
-    pub fn new(path: String) -> anyhow::Result<Self> {
+impl LocalDBInner {
+    fn new(path: String) -> anyhow::Result<Self> {
         let p = Path::new(&path);
 
         // 블록 캐시 설정 (4GB)
@@ -170,73 +180,34 @@ impl Leveldb {
 
         let db = DBWithThreadMode::<MultiThreaded>::open(&options, p)?;
 
-        Ok(Leveldb {
-            db: Arc::new(db),
-            write_opts: Arc::new(write_opts),
-            read_opts: Arc::new(read_opts),
-            path: path,
+        Ok(LocalDBInner {
+            db,
+            write_opts,
+            read_opts,
+            path,
         })
     }
 
-    pub fn put(&self, key: &str, value: &str) -> anyhow::Result<()> {
+    fn put(&self, key: &str, value: &str) -> anyhow::Result<()> {
         self.db
             .put_opt(key.as_bytes(), value.as_bytes(), &self.write_opts)
             .map_err(anyhow::Error::from)
     }
 
-    pub fn get(&self, key: &str) -> anyhow::Result<Option<String>> {
+    fn get(&self, key: &str) -> anyhow::Result<Option<String>> {
         Ok(self
             .db
             .get_opt(key.as_bytes(), &self.read_opts)?
             .map(|bytes| String::from_utf8_lossy(&bytes).to_string()))
     }
 
-    pub fn get_json<T>(&self, key: &str) -> anyhow::Result<Option<T>>
-    where
-        T: for<'de> Deserialize<'de>,
-    {
-        match self.get(key)? {
-            Some(json_str) => {
-                let value = serde_json::from_str(&json_str)?;
-                Ok(Some(value))
-            }
-            None => Ok(None),
-        }
-    }
-
-    pub fn put_json<T>(&self, key: &str, value: &T) -> anyhow::Result<()>
-    where
-        T: Serialize,
-    {
-        let json_str = serde_json::to_string(value)?;
-        self.put(key, &json_str)
-    }
-
-    pub fn delete(&self, key: &str) -> anyhow::Result<()> {
+    fn delete(&self, key: &str) -> anyhow::Result<()> {
         self.db
             .delete_opt(key.as_bytes(), &self.write_opts)
             .map_err(anyhow::Error::from)
     }
 
-    pub fn for_each<F>(&self, mut f: F)
-    where
-        F: FnMut(usize, String, String),
-    {
-        let iter = self.db.iterator(rocksdb::IteratorMode::Start);
-        for (i, item) in iter.enumerate() {
-            if let Ok((key, value)) = item {
-                let key_str = String::from_utf8_lossy(&key).to_string();
-                let value_str = String::from_utf8_lossy(&value).to_string();
-                f(i, key_str, value_str);
-            }
-        }
-    }
-
-    pub fn get_path(&self) -> &str {
-        &self.path
-    }
-
-    pub fn get_stats(&self) -> DBStats {
+    fn get_stats(&self) -> DBStats {
         // 데이터베이스 속성 가져오기
         let props = self
             .db
@@ -328,65 +299,150 @@ impl Leveldb {
         }
     }
 
-    pub fn compact_range(&self) {
+    fn compact_range(&self) {
         self.db.compact_range(None::<&[u8]>, None::<&[u8]>);
     }
 
-    pub fn flush(&self) -> anyhow::Result<()> {
+    fn flush(&self) -> anyhow::Result<()> {
         self.db.flush().map_err(anyhow::Error::from)
     }
 
-    pub fn get_property(&self, name: &str) -> anyhow::Result<Option<String>> {
+    fn get_property(&self, name: &str) -> anyhow::Result<Option<String>> {
         self.db.property_value(name).map_err(anyhow::Error::from)
+    }
+}
+
+#[derive(Clone)]
+pub struct LocalDB {
+    inner: Arc<LocalDBInner>,
+}
+
+impl LocalDB {
+    pub async fn new(path: String) -> anyhow::Result<Self> {
+        let inner = task::spawn_blocking(move || LocalDBInner::new(path)).await??;
+
+        Ok(LocalDB {
+            inner: Arc::new(inner),
+        })
+    }
+
+    pub async fn put(&self, key: String, value: String) -> anyhow::Result<()> {
+        let inner = self.inner.clone();
+        task::spawn_blocking(move || inner.put(&key, &value)).await?
+    }
+
+    pub async fn get(&self, key: String) -> anyhow::Result<Option<String>> {
+        let inner = self.inner.clone();
+        task::spawn_blocking(move || inner.get(&key)).await?
+    }
+
+    pub async fn get_json<T>(&self, key: String) -> anyhow::Result<Option<T>>
+    where
+        T: for<'de> Deserialize<'de>,
+    {
+        match self.get(key).await? {
+            Some(json_str) => {
+                let value = serde_json::from_str(&json_str)?;
+                Ok(Some(value))
+            }
+            None => Ok(None),
+        }
+    }
+
+    pub async fn put_json<T>(&self, key: String, value: &T) -> anyhow::Result<()>
+    where
+        T: Serialize,
+    {
+        let json_str = serde_json::to_string(value)?;
+        self.put(key, json_str).await
+    }
+
+    pub async fn delete(&self, key: String) -> anyhow::Result<()> {
+        let inner = self.inner.clone();
+        task::spawn_blocking(move || inner.delete(&key)).await?
+    }
+
+    pub fn get_path(&self) -> &str {
+        &self.inner.path
+    }
+
+    pub async fn get_stats(&self) -> DBStats {
+        let inner = self.inner.clone();
+
+        task::spawn_blocking(move || inner.get_stats())
+            .await
+            .unwrap_or_else(|_| DBStats {
+                total_entries: 0,
+                last_update: 0,
+                memory_usage: 0,
+                block_cache_usage: 0,
+                memtable_usage: 0,
+                sst_files_size: 0,
+                read_amplification: 0,
+                write_amplification: 0,
+                compression_ratio: 0.0,
+                pending_compaction_bytes: 0,
+            })
+    }
+
+    pub async fn compact_range(&self) {
+        let inner = self.inner.clone();
+        task::spawn_blocking(move || inner.compact_range())
+            .await
+            .unwrap_or_else(|e| {
+                eprintln!("Error in compact_range: {}", e);
+            });
+    }
+
+    pub async fn flush(&self) -> anyhow::Result<()> {
+        let inner = self.inner.clone();
+        task::spawn_blocking(move || inner.flush()).await?
+    }
+
+    pub async fn get_property(&self, name: String) -> anyhow::Result<Option<String>> {
+        let inner = self.inner.clone();
+        task::spawn_blocking(move || inner.get_property(&name)).await?
     }
 
     /// 새로운 트랜잭션을 시작합니다.
-    /// 
+    ///
     /// # Returns
     /// * `TransactionWrapper` - 트랜잭션 래퍼 객체
-    /// 
+    ///
     /// # Example
     /// ```rust
     /// use cassry::leveldb::Leveldb;
     /// use serde::{Serialize, Deserialize};
-    /// 
+    ///
     /// #[derive(Serialize, Deserialize, Debug)]
     /// struct User {
     ///     id: u32,
     ///     name: String,
     ///     balance: f64,
     /// }
-    /// 
-    /// let db = Leveldb::new("test_db".to_string())?;
-    /// 
+    ///
+    /// let db = Leveldb::new("test_db".to_string()).await?;
+    ///
     /// // 트랜잭션 시작
     /// let mut tx = db.transaction();
-    /// 
+    ///
     /// // 트랜잭션 내에서 여러 작업 수행
     /// let user1 = User { id: 1, name: "Alice".to_string(), balance: 100.0 };
     /// let user2 = User { id: 2, name: "Bob".to_string(), balance: 200.0 };
-    /// 
+    ///
     /// tx.put_json("user:1", &user1)?;
     /// tx.put_json("user:2", &user2)?;
-    /// 
+    ///
     /// // 기존 사용자 조회 및 업데이트
-    /// if let Some(mut existing_user) = tx.get_json::<User>("user:1")? {
+    /// if let Some(mut existing_user) = tx.get_json::<User>("user:1").await? {
     ///     existing_user.balance += 50.0;
     ///     tx.put_json("user:1", &existing_user)?;
     /// }
-    /// 
+    ///
     /// // 트랜잭션 커밋
-    /// tx.commit()?;
+    /// tx.commit().await?;
     /// ```
     pub fn transaction(&self) -> TransactionWrapper {
-        TransactionWrapper::new(self.db.clone(), self.write_opts.clone(), self.read_opts.clone())
-    }
-}
-
-impl Drop for Leveldb {
-    fn drop(&mut self) {
-        if let Err(e) = self.flush() {
-            eprintln!("Error flushing database: {}", e);
-        }
+        TransactionWrapper::new(self.inner.clone())
     }
 }
