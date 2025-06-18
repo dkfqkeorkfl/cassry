@@ -1,5 +1,7 @@
 use chrono::{DateTime, Duration, TimeZone, Utc};
 use std::sync::Arc;
+use std::fs;
+use std::path::Path;
 use tokio::sync::RwLock;
 
 use super::localdb::LocalDB;
@@ -35,10 +37,9 @@ pub fn get_folder_name(
     let folder_time = Utc.timestamp_opt(folder_timestamp, 0).unwrap();
 
     Ok(format!(
-        "{}/{} {}",
+        "{}/{}",
         base_path,
-        timestamp.format("%Y-%m-%d"),
-        folder_time.format("%Y-%m-%d %H:%M:%S")
+        folder_time.format("%Y-%m-%d_%H-%M-%S")
     ))
 }
 
@@ -57,7 +58,14 @@ impl TimeWindowDBInner {
     async fn new(base_path: &str, ttl: Duration, delete_legacy: bool) -> anyhow::Result<Self> {
         let current_time = Utc::now();
 
+        // Create base directory if it doesn't exist
+        let base_path_obj = Path::new(base_path);
+        if !base_path_obj.exists() {
+            fs::create_dir_all(base_path_obj)?;
+        }
+
         let db_path = get_folder_name(base_path, &ttl, &current_time)?;
+        println!("db_path: {}", db_path);
         let current_db = Arc::new(LocalDB::new(db_path).await?);
 
         Ok(Self {
