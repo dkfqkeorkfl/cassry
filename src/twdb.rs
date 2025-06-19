@@ -1,5 +1,4 @@
 use chrono::{DateTime, Duration, TimeZone, Utc};
-use std::sync::Arc;
 use std::fs;
 use std::path::Path;
 use tokio::sync::RwLock;
@@ -49,30 +48,28 @@ struct TimeWindowDBInner {
     ttl: Duration,
     delete_legacy: bool,
 
-    current_db: Arc<LocalDB>,
-    previous_db: Option<Arc<LocalDB>>,
+    current_db: LocalDB,
+    previous_db: Option<LocalDB>,
     created: chrono::DateTime<Utc>,
 }
 
 impl TimeWindowDBInner {
-    async fn new(base_path: &str, ttl: Duration, delete_legacy: bool) -> anyhow::Result<Self> {
+    async fn new(base_path: String, ttl: Duration, delete_legacy: bool) -> anyhow::Result<Self> {
         let current_time = Utc::now();
 
         // Create base directory if it doesn't exist
-        let base_path_obj = Path::new(base_path);
+        let base_path_obj = Path::new(&base_path);
         if !base_path_obj.exists() {
             fs::create_dir_all(base_path_obj)?;
         }
 
-        let db_path = get_folder_name(base_path, &ttl, &current_time)?;
+        let db_path = get_folder_name(&base_path, &ttl, &current_time)?;
         println!("db_path: {}", db_path);
-        let current_db = Arc::new(LocalDB::new(db_path).await?);
-
         Ok(Self {
             path: base_path.to_string(),
             ttl,
             delete_legacy,
-            current_db,
+            current_db : LocalDB::new(db_path).await?,
             previous_db: None,
             created: current_time,
         })
@@ -89,7 +86,7 @@ impl TimeWindowDBInner {
 
         let current_time = Utc::now();
         let new_db_path = get_folder_name(&self.path, &self.ttl, &current_time)?;
-        let new_db = Arc::new(LocalDB::new(new_db_path).await?);
+        let new_db = LocalDB::new(new_db_path).await?;
         
         // Handle old DB
         if let Some(old_db) = self.previous_db.take() {
@@ -153,16 +150,26 @@ impl TimeWindowDBInner {
 }
 
 /// 스레드 안전한 TimeWindowDB 래퍼
-#[derive(Clone)]
 pub struct TimeWindowDB {
-    inner: Arc<RwLock<TimeWindowDBInner>>,
+    inner: RwLock<TimeWindowDBInner>,
+}
+
+#[derive(Clone)]
+pub struct TimeWindowDBConfig {
+    pub base_path: String,
+    pub ttl: Duration,
+    pub delete_legacy: bool,
 }
 
 impl TimeWindowDB {
-    pub async fn new(base_path: &str, ttl: Duration, delete_legacy: bool) -> anyhow::Result<Self> {
+    pub async fn from_config(config: TimeWindowDBConfig) -> anyhow::Result<Self> {
+        Self::new(config.base_path, config.ttl, config.delete_legacy).await
+    }
+
+    pub async fn new(base_path: String, ttl: Duration, delete_legacy: bool) -> anyhow::Result<Self> {
         let inner = TimeWindowDBInner::new(base_path, ttl, delete_legacy).await?;
         Ok(Self {
-            inner: Arc::new(RwLock::new(inner)),
+            inner: inner.into(),
         })
     }
 
