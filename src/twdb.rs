@@ -64,7 +64,6 @@ impl TimeWindowDBInner {
         }
 
         let db_path = get_folder_name(&base_path, &ttl, &current_time)?;
-        println!("db_path: {}", db_path);
         Ok(Self {
             path: base_path.to_string(),
             ttl,
