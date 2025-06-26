@@ -20,6 +20,12 @@ pub struct DBStats {
     pub pending_compaction_bytes: u64,
 }
 
+#[derive(Debug, Clone)]
+enum Operation {
+    Put { key: String, value: String },
+    Delete { key: String },
+}
+
 /// 내부 블로킹 구현체
 struct LocalDBInner {
     db: DBWithThreadMode<MultiThreaded>,
@@ -30,41 +36,58 @@ struct LocalDBInner {
 
 /// 트랜잭션을 위한 래퍼 구조체 (WriteBatch 기반)
 pub struct TransactionWrapper {
-    batch: WriteBatch,
     inner: Arc<LocalDBInner>,
-    pending_operations: Vec<(String, String)>, // key, value pairs for JSON operations
+    pending_operations: Vec<Operation>,
 }
 
 impl TransactionWrapper {
     /// 새로운 트랜잭션을 생성합니다.
     pub(self) fn new(inner: Arc<LocalDBInner>) -> Self {
         Self {
-            batch: WriteBatch::default(),
             inner,
             pending_operations: Vec::new(),
         }
     }
 
     /// 트랜잭션 내에서 키-값 쌍을 저장합니다.
-    pub fn put(&mut self, key: &str, value: &str) -> anyhow::Result<()> {
-        self.batch.put(key.as_bytes(), value.as_bytes());
+    pub fn put(&mut self, key: String, value: String) -> anyhow::Result<()> {
+        self.pending_operations.push(Operation::Put { key, value });
         Ok(())
     }
 
     /// 트랜잭션 내에서 JSON 객체를 저장합니다.
-    pub fn put_json<T>(&mut self, key: &str, value: &T) -> anyhow::Result<()>
+    pub fn put_json<T>(&mut self, key: String, value: &T) -> anyhow::Result<()>
     where
         T: Serialize,
     {
         let json_str = serde_json::to_string(value)?;
-        self.pending_operations.push((key.to_string(), json_str));
+        self.pending_operations.push(Operation::Put {
+            key,
+            value: json_str,
+        });
         Ok(())
     }
 
     /// 트랜잭션 내에서 키로 값을 조회합니다.
     pub async fn get(&self, key: String) -> anyhow::Result<Option<String>> {
-        let inner = self.inner.clone();
+        // 먼저 pending operations에서 찾기
+        for operation in &self.pending_operations {
+            match operation {
+                Operation::Put { key: op_key, value } => {
+                    if op_key == &key {
+                        return Ok(Some(value.clone()));
+                    }
+                }
+                Operation::Delete { key: op_key } => {
+                    if op_key == &key {
+                        return Ok(None);
+                    }
+                }
+            }
+        }
 
+        // pending operations에 없으면 데이터베이스에서 조회
+        let inner = self.inner.clone();
         task::spawn_blocking(move || {
             Ok(inner
                 .db
@@ -89,20 +112,28 @@ impl TransactionWrapper {
     }
 
     /// 트랜잭션 내에서 키를 삭제합니다.
-    pub fn delete(&mut self, key: &str) -> anyhow::Result<()> {
-        self.batch.delete(key.as_bytes());
+    pub fn delete(&mut self, key: String) -> anyhow::Result<()> {
+        self.pending_operations.push(Operation::Delete { key });
         Ok(())
     }
 
     /// 트랜잭션을 커밋합니다.
-    pub async fn commit(mut self) -> anyhow::Result<()> {
-        // 먼저 pending JSON operations를 batch에 추가
-        for (key, value) in self.pending_operations {
-            self.batch.put(key.as_bytes(), value.as_bytes());
+    pub async fn commit(self) -> anyhow::Result<()> {
+        let mut batch = WriteBatch::default();
+
+        // pending operations를 순서대로 batch에 추가
+        for operation in self.pending_operations {
+            match operation {
+                Operation::Put { key, value } => {
+                    batch.put(key.as_bytes(), value.as_bytes());
+                }
+                Operation::Delete { key } => {
+                    batch.delete(key.as_bytes());
+                }
+            }
         }
 
         let inner = self.inner.clone();
-        let batch = self.batch;
 
         // WriteBatch를 데이터베이스에 적용
         task::spawn_blocking(move || {
