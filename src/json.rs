@@ -1,4 +1,11 @@
 use anyhow::*;
+use serde::Serialize;
+
+pub fn url_encode_object<T: Serialize>(v: &T) -> Result<String> {
+    let v = serde_json::to_value(v)?;
+    url_encode(&v)
+}
+
 
 pub fn url_encode(v: &serde_json::Value) -> Result<String> {
     if let Option::Some(datas) = v.as_object() {
