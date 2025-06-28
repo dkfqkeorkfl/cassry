@@ -35,6 +35,7 @@ pub use cache::*;
 pub use localdb::*;
 pub use types::*;
 pub use log::Level as LogLvl;
+pub use log::LevelFilter as LogLvlFilter;
 // pub use rust_decimal::Decimal;
 
 static SLACK: once_cell::sync::Lazy<slack::Slack> =

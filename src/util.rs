@@ -4,6 +4,7 @@ use futures::Future;
 use ring::aead;
 use serde::{Deserialize, Serialize};
 use std::cmp::Ordering;
+use zeroize::Zeroize;
 
 pub fn serialize_chrono_duration<S>(
     dur: &chrono::Duration,
@@ -169,32 +170,57 @@ pub struct EncryptedData {
 }
 
 pub fn decrypt_aes_gcm_128(key: &str, iv: &str, data: EncryptedData) -> anyhow::Result<secrecy::SecretString> {
-    let key_bytes = hex::decode(key)?;
-    let nonce_bytes = hex::decode(iv)?;
-    let ciphertext_bytes = hex::decode(data.cipher)?;
-    let tag_bytes = hex::decode(data.tag)?;
+    // 1. 디코딩
+    let mut key_bytes = hex::decode(key)?;
+    let mut nonce_bytes = hex::decode(iv)?;
+    let mut ciphertext = hex::decode(data.cipher)?;
+    let tag = hex::decode(data.tag)?;
 
+    // 2. 입력 유효성 검사
+    if key_bytes.len() != 16 {
+        return Err(crate::anyhowln!("AES-128 requires 16-byte key"));
+    }
+    if nonce_bytes.len() != 12 {
+        return Err(crate::anyhowln!("GCM requires 12-byte nonce"));
+    }
+
+    // 3. tag를 ciphertext 뒤에 붙이기
+    ciphertext.extend_from_slice(&tag);
+
+    // 4. 복호화
     let nonce = aead::Nonce::try_assume_unique_for_key(&nonce_bytes)
-        .map_err(|_| crate::anyhowln!("Occur Error from aead::Nonce::try_assume_unique_for_key"))?;
+        .map_err(|_| crate::anyhowln!("Invalid nonce"))?;
     let unbound_key = aead::UnboundKey::new(&aead::AES_128_GCM, &key_bytes)
-        .map_err(|_| crate::anyhowln!("Occur Error from aead::UnboundKey::new"))?;
-    let safe_key = aead::LessSafeKey::new(unbound_key);
+        .map_err(|_| crate::anyhowln!("Invalid key"))?;
+    let key = aead::LessSafeKey::new(unbound_key);
 
-    let mut in_out = ciphertext_bytes.to_vec();
-    in_out.extend_from_slice(&tag_bytes);
-    safe_key
-        .open_in_place(nonce, aead::Aad::empty(), &mut in_out)
-        .map_err(|_| crate::anyhowln!("Occur Error from safe_key.open_in_place"))?;
+    let decrypted = key
+        .open_in_place(nonce, aead::Aad::empty(), &mut ciphertext)
+        .map_err(|_| crate::anyhowln!("Decryption failed"))?;
 
-    // 이제 in_out 벡터의 처음부터 암호화된 데이터의 길이까지가 복호화된 데이터입니다.
-    let decrypted = String::from_utf8_lossy(&in_out[..ciphertext_bytes.len()]);
-    Ok(decrypted.into_owned().into())
+    // 5. 복호화 결과를 안전하게 반환
+    let secret_string = String::from_utf8_lossy(decrypted).into_owned();
+    let result = secrecy::SecretString::new(secret_string.into());
+
+    // 6. 민감한 버퍼들 메모리에서 제거
+    key_bytes.zeroize();
+    nonce_bytes.zeroize();
+    ciphertext.zeroize();
+
+    Ok(result)
 }
 
 pub fn encrypt_aes_gcm_128(key: &str, iv: &str, plaintext: &str) -> anyhow::Result<EncryptedData> {
-    let key_bytes = hex::decode(key)?;
-    let nonce_bytes = hex::decode(iv)?;
+    let mut key_bytes = hex::decode(key)?;
+    let mut nonce_bytes = hex::decode(iv)?;
     let plaintext_bytes = plaintext.as_bytes();
+
+    if key_bytes.len() != 16 {
+        return Err(crate::anyhowln!("AES-128 requires 16-byte key"));
+    }
+    if nonce_bytes.len() != 12 {
+        return Err(crate::anyhowln!("GCM requires 12-byte nonce"));
+    }
 
     // Nonce 객체를 생성합니다.
     let nonce = aead::Nonce::try_assume_unique_for_key(&nonce_bytes)
@@ -215,6 +241,10 @@ pub fn encrypt_aes_gcm_128(key: &str, iv: &str, plaintext: &str) -> anyhow::Resu
     // 결과 데이터를 헥사스트링으로 변환합니다.
     let cipher = hex::encode(&in_out[..plaintext_bytes.len()]);
     let tag = hex::encode(&in_out[plaintext_bytes.len()..]);
+
+    in_out.zeroize();
+    key_bytes.zeroize();
+    nonce_bytes.zeroize();
 
     Ok(EncryptedData {
         cipher: cipher,
