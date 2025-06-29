@@ -222,35 +222,31 @@ pub fn encrypt_aes_gcm_128(key: &str, iv: &str, plaintext: &str) -> anyhow::Resu
         return Err(crate::anyhowln!("GCM requires 12-byte nonce"));
     }
 
-    // Nonce 객체를 생성합니다.
     let nonce = aead::Nonce::try_assume_unique_for_key(&nonce_bytes)
-        .map_err(|_| crate::anyhowln!("Error from aead::Nonce::try_assume_unique_for_key"))?;
+        .map_err(|_| crate::anyhowln!("Invalid nonce"))?;
 
-    // 암호화 키를 생성합니다.
     let unbound_key = aead::UnboundKey::new(&aead::AES_128_GCM, &key_bytes)
-        .map_err(|_| crate::anyhowln!("Error from aead::UnboundKey::new"))?;
+        .map_err(|_| crate::anyhowln!("Invalid key"))?;
     let safe_key = aead::LessSafeKey::new(unbound_key);
 
-    // 암호화 과정을 실행합니다.
-    let mut in_out = plaintext_bytes.to_vec();
-    in_out.extend_from_slice(&[0; 16]); // 태그 길이 추가 (AES-GCM 128의 태그 길이는 16 바이트)
+    let mut in_out = plaintext_bytes.to_vec(); // ❗ no 0 padding
     safe_key
         .seal_in_place_append_tag(nonce, aead::Aad::empty(), &mut in_out)
-        .map_err(|_| crate::anyhowln!("Error from safe_key.seal_in_place_append_tag"))?;
+        .map_err(|_| crate::anyhowln!("Encryption failed"))?;
 
-    // 결과 데이터를 헥사스트링으로 변환합니다.
-    let cipher = hex::encode(&in_out[..plaintext_bytes.len()]);
-    let tag = hex::encode(&in_out[plaintext_bytes.len()..]);
+    // 태그는 끝 16바이트
+    let tag_start = in_out.len() - 16;
+    let cipher = hex::encode(&in_out[..tag_start]);
+    let tag = hex::encode(&in_out[tag_start..]);
 
+    // 민감 데이터 정리
     in_out.zeroize();
     key_bytes.zeroize();
     nonce_bytes.zeroize();
 
-    Ok(EncryptedData {
-        cipher: cipher,
-        tag: tag,
-    })
+    Ok(EncryptedData { cipher, tag })
 }
+
 
 /// Performs an asynchronous binary search.
 ///
