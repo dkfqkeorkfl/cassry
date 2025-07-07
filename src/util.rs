@@ -2,9 +2,18 @@ use argon2::{password_hash::rand_core, PasswordHasher, PasswordVerifier};
 use chrono::{DateTime, TimeZone, Utc};
 use futures::Future;
 use ring::aead;
-use serde::{Deserialize, Serialize};
+use secrecy::SecretString;
+use serde::{Deserialize, Deserializer, Serialize};
 use std::cmp::Ordering;
 use zeroize::Zeroize;
+
+pub fn deserialize_secret_string<'de, D>(deserializer: D) -> Result<SecretString, D::Error>
+where
+    D: Deserializer<'de>,
+{
+    let s = String::deserialize(deserializer)?;
+    Ok(SecretString::from(s))
+}
 
 pub fn serialize_chrono_duration<S>(
     dur: &chrono::Duration,
