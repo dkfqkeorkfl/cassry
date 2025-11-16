@@ -8,7 +8,11 @@ pub fn url_encode_object<T: Serialize>(v: &T) -> Result<String> {
 
 
 pub fn url_encode(v: &serde_json::Value) -> Result<String> {
-    if let Option::Some(datas) = v.as_object() {
+    if v.is_null() {
+        return Ok(String::default());
+    }
+    else if let Option::Some(datas
+    ) = v.as_object() {
         let params = datas
             .iter()
             .map(|v| {
