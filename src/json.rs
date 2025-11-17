@@ -1,3 +1,5 @@
+use std::collections::BTreeMap;
+
 use anyhow::*;
 use serde::Serialize;
 
@@ -6,27 +8,27 @@ pub fn url_encode_object<T: Serialize>(v: &T) -> Result<String> {
     url_encode(&v)
 }
 
-
 pub fn url_encode(v: &serde_json::Value) -> Result<String> {
     if v.is_null() {
         return Ok(String::default());
-    }
-    else if let Option::Some(datas
-    ) = v.as_object() {
-        let params = datas
-            .iter()
-            .map(|v| {
-                let v1 = if v.1.is_string() {
-                    v.1.as_str().map(|v| v.to_string()).unwrap()
-                } else {
-                    v.1.to_string()
-                };
-                (v.0, v1)
-            })
-            .collect::<Vec<(&String, String)>>();
+    } else if let Option::Some(obj) = v.as_object() {
+        let mut sorted_vec: Vec<(&str, String)> = Vec::with_capacity(obj.len());
+        for (key, value) in obj {
+            let val_str = match value {
+                serde_json::Value::String(s) => s.clone(),
+                _ => value.to_string(),
+            };
 
-        let urlcode = serde_urlencoded::to_string(params)?;
-        return Ok(urlcode);
+
+            // 이진 탐색으로 삽입 위치 찾기
+            let pos = sorted_vec
+                .binary_search_by(|(k, _)| (*k).cmp(key.as_str()))
+                .unwrap_or_else(|e| e);
+            sorted_vec.insert(pos, (key, val_str));
+        }
+
+        let encoded = serde_urlencoded::to_string(&sorted_vec)?;
+        return Ok(encoded);
     }
 
     return Err(crate::anyhowln!("invalid param"));
