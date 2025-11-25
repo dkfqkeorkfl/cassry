@@ -1,21 +1,16 @@
-use std::{
-    collections::HashMap,
-    sync::Arc,
-};
+use std::{collections::HashMap, sync::Arc};
 
 use chrono::Local;
 use regex::Regex;
 use reqwest::{Client, Response};
 use tokio::sync::RwLock;
-use super::timelimiter::Limiter;
 
 struct Inner {
     token: String,
     channels: [String; log::Level::Trace as usize + 1],
-    messages: Vec<(log::Level, String)>,
+    messages: HashMap<log::Level, Vec<String>>,
     client: Client,
-
-    limiter : Limiter<String>
+    // 제약이 필요하면 moka::Cache를 사용하자
 }
 
 impl Inner {
@@ -30,7 +25,7 @@ impl Inner {
     //     }
     // }
 
-    pub fn new(token: String, channels: HashMap<log::Level, String>, cooldown: f64) -> Self {
+    pub fn new(token: String, channels: HashMap<log::Level, String>) -> Self {
         let mut items = [
             String::default(),
             String::default(),
@@ -49,12 +44,11 @@ impl Inner {
             channels: items,
             messages: Default::default(),
             client: Default::default(),
-            limiter:Limiter::new(cooldown)
         }
     }
 
-    pub async fn send(&self, item: &(log::Level, String)) -> anyhow::Result<Response> {
-        let channel = &self.channels[item.0 as usize];
+    pub async fn send(&mut self, lvl: log::Level, msg: String) -> anyhow::Result<()> {
+        let channel = &self.channels[lvl as usize];
         let res = self
             .client
             .post("https://slack.com/api/chat.postMessage")
@@ -62,60 +56,32 @@ impl Inner {
             .header("Content-Type", "application/json; charset=utf-8")
             .json(&serde_json::json!({
                 "channel": channel,
-                "text": item.1
+                "text": msg
             }))
             .send()
-            .await?
-            .error_for_status()?;
+            .await?;
 
-        Ok(res)
+        let json = res.json::<serde_json::Value>().await?;
+        let success = json["ok"].as_bool().unwrap_or(false);
+        if !success {
+            eprint!("Failed to send message to Slack: {}", json.to_string());
+            self.messages.entry(lvl).or_insert(Vec::new()).push(msg);
+        }
+
+        Ok(())
     }
 
     pub async fn put(&mut self, lvl: log::Level, msg: String) {
-        let mut i = 0;
-        let i = loop {
-            if i < self.messages.len() {
-                if let Ok(_res) = self.send(&self.messages[i]).await {
-                    i += 1;
-                } else {
-                    break i;
-                }
-            } else {
-                break i;
-            }
-        };
-        self.messages.drain(0..i);
-
-        let key = self.normalize_message(&msg);
-        if self.limiter.put(key.into()).is_some() {
-            return;
-        }
-
-        let message = format!(
-            "[{}][{}] - {}",
-            Local::now().format("%Y-%m-%d %H:%M:%S"),
-            lvl.to_string(),
-            msg
-        );
-        let item = (lvl, message);
-        let remain = if self.messages.is_empty() {
-            if let Ok(_res) = self.send(&item).await {
-                None
-            } else {
-                Some(item)
-            }
-        } else {
-            Some(item)
-        };
-
-        if let Some(item) = remain {
-            self.messages.push(item);
-        }
+        // let message = format!("[{}] - {}", Local::now().format("%Y-%m-%d %H:%M:%S"), msg);
+        // self.messages.entry(lvl).or_insert(Vec::new()).push(message);
     }
 
-    fn normalize_message(&self, msg: &str) -> String {
-        let re = Regex::new(r"\d").unwrap();
-        re.replace_all(msg, "").to_string()
+    fn flash_msg(&mut self, lvl: log::Level) -> String {
+        if let Some(v) = self.messages.remove(&lvl) {
+            v.join("\n")
+        } else {
+            Default::default()
+        }
     }
 }
 
@@ -128,15 +94,46 @@ pub struct SlackParams {
 #[derive(Default)]
 pub struct Slack {
     inner: Arc<RwLock<Option<Inner>>>,
+    handler: RwLock<Option<tokio::task::JoinHandle<()>>>,
 }
 
 impl Slack {
-    pub async fn init(
-        &self,
-        params : SlackParams,
-    ) {
-        let mut inner = self.inner.write().await;
-        *inner = Some(Inner::new(params.token, params.channels, params.cooldown));
+    pub async fn init(&self, params: SlackParams) {
+        {
+            let mut inner = self.inner.write().await;
+            *inner = Some(Inner::new(params.token, params.channels));
+        }
+
+        {
+            let wpt = Arc::downgrade(&self.inner);
+            let dur = std::time::Duration::from_secs(1);
+
+            let h = tokio::spawn(async move {
+                loop {
+                    if let Some(inner) = wpt.upgrade() {
+                        let mut inner = inner.write().await;
+                        if let Some(inner) = inner.as_mut() {
+                            for lvl in log::Level::iter() {
+                                let msg = inner.flash_msg(lvl);
+                                if msg.is_empty() {
+                                    continue;
+                                }
+                                
+                                if let Err(e) = inner.send(lvl, msg).await {
+                                    eprint!("Failed to send message to Slack: {}", e.to_string());
+                                }
+                            }
+                        }
+                    } else {
+                        break;
+                    }
+                    tokio::time::sleep(dur).await;
+                }
+            });
+
+            let mut handler = self.handler.write().await;
+            *handler = Some(h);
+        }
     }
 
     pub fn put(&self, lvl: log::Level, msg: String) {
