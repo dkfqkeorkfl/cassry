@@ -108,15 +108,14 @@ impl LazyDecimal {
     }
 
     pub async fn number(&self) -> anyhow::Result<Decimal> {
-        let result = async {
+        let result = {
             let reader = self.number.read().await;
             if let Some(numbers) = reader.as_ref() {
                 Some(numbers.clone())
             } else {
                 None
             }
-        }
-        .await;
+        };
 
         if let Some(numbers) = result {
             Ok(numbers)
