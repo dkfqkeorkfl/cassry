@@ -2,8 +2,8 @@ use proc_macro::TokenStream;
 use quote::quote;
 use syn::{parse_macro_input, Data, DataEnum, DeriveInput, Expr, Variant};
 
-#[proc_macro_derive(RespError, attributes(status, value, error))]
-pub fn derive_resp_error(input: TokenStream) -> TokenStream {
+#[proc_macro_derive(ErrCode, attributes(status, value, error))]
+pub fn derive_err_code(input: TokenStream) -> TokenStream {
     let input = parse_macro_input!(input as DeriveInput);
 
     let enum_name = &input.ident;
@@ -14,7 +14,7 @@ pub fn derive_resp_error(input: TokenStream) -> TokenStream {
         _ => {
             return syn::Error::new_spanned(
                 &input,
-                "RespError derive macro can only be used on enums",
+                "ErrCode derive macro can only be used on enums",
             )
             .to_compile_error()
             .into();
@@ -30,7 +30,7 @@ pub fn derive_resp_error(input: TokenStream) -> TokenStream {
         let variant_str = variant_name.to_string();
 
         let status = parse_status_attr(variant).unwrap_or(500u16);
-        let value = parse_value_attr(variant).unwrap_or(0u64);
+        let value = parse_value_attr(variant).unwrap_or(1u64);
         let error_msg = parse_error_attr(variant)
             .unwrap_or_else(|| variant_str.clone());
 
@@ -148,7 +148,7 @@ pub fn derive_resp_error(input: TokenStream) -> TokenStream {
     let (impl_generics, ty_generics, where_clause) = generics.split_for_impl();
 
     let expanded = quote! {
-        impl #impl_generics ::cassry::RespError for #enum_name #ty_generics #where_clause {
+        impl #impl_generics ::cassry::ErrCode for #enum_name #ty_generics #where_clause {
             fn status(&self) -> u16 {
                 match self {
                     #(#status_arms)*
@@ -208,7 +208,7 @@ fn parse_value_attr(variant: &Variant) -> Option<u64> {
 
 fn parse_error_attr(variant: &Variant) -> Option<String> {
     // #[error(...)] attribute를 찾습니다
-    // 이 attribute는 thiserror와 RespError derive가 모두 사용할 수 있습니다
+    // 이 attribute는 thiserror와 ErrCode derive가 모두 사용할 수 있습니다
     // 먼저 찾은 것을 사용합니다 (일반적으로 thiserror가 먼저 적용되므로 thiserror의 것이 먼저 찾아질 수 있습니다)
     for attr in &variant.attrs {
         if attr.path().is_ident("error") {
