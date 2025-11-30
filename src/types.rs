@@ -21,3 +21,10 @@ impl<T> Line<T> {
         &self.1
     }
 }
+
+pub trait RespError {
+    fn status(&self) -> u16;
+    fn value(&self) -> u64;
+    fn to_response(&self) -> (u16, serde_json::Value);
+}
+
