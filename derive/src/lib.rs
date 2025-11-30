@@ -148,7 +148,7 @@ pub fn derive_err_code(input: TokenStream) -> TokenStream {
     let (impl_generics, ty_generics, where_clause) = generics.split_for_impl();
 
     let expanded = quote! {
-        impl #impl_generics ::cassry::ErrCode for #enum_name #ty_generics #where_clause {
+        impl #impl_generics crate::cassry::ErrCode for #enum_name #ty_generics #where_clause {
             fn status(&self) -> u16 {
                 match self {
                     #(#status_arms)*
