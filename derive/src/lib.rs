@@ -30,7 +30,7 @@ pub fn derive_err_code(input: TokenStream) -> TokenStream {
         let variant_str = variant_name.to_string();
 
         let status = parse_status_attr(variant).unwrap_or(500u16);
-        let value = parse_value_attr(variant).unwrap_or(1u64);
+        let value = parse_value_attr(variant).unwrap_or(status as u64);
         let error_msg = parse_error_attr(variant)
             .unwrap_or_else(|| variant_str.clone());
 
