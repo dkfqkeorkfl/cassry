@@ -1,8 +1,6 @@
 use std::{collections::HashMap, sync::Arc};
 
-use chrono::Local;
-use regex::Regex;
-use reqwest::{Client, Response};
+use reqwest::Client;
 use tokio::sync::RwLock;
 
 struct Inner {
@@ -88,7 +86,6 @@ impl Inner {
 pub struct SlackParams {
     pub token: String,
     pub channels: HashMap<log::Level, String>,
-    pub cooldown: f64,
 }
 
 #[derive(Default)]

@@ -78,7 +78,7 @@ pub fn derive_err_code(input: TokenStream) -> TokenStream {
             #field_pattern => #value,
         });
 
-        // to_response() 구현
+        // as_response() 구현
         if is_unit {
             response_arms.push(quote! {
                 #field_pattern => {
@@ -89,8 +89,8 @@ pub fn derive_err_code(input: TokenStream) -> TokenStream {
                         .replace("{3}", "").replace("{4}", "").replace("{5}", "")
                         .trim().to_string();
                     let json = serde_json::json!({
-                        "status": value,
-                        "reason": reason
+                        "code": value,
+                        "data": reason
                     });
                     (status, json)
                 },
@@ -107,8 +107,8 @@ pub fn derive_err_code(input: TokenStream) -> TokenStream {
                         format!("{}: {}", msg, field0)
                     };
                     let json = serde_json::json!({
-                        "status": value,
-                        "reason": reason
+                        "code": value,
+                        "data": reason
                     });
                     (status, json)
                 },
@@ -136,8 +136,8 @@ pub fn derive_err_code(input: TokenStream) -> TokenStream {
                     let mut reason = #error_msg.to_string();
                     #(#placeholder_replacements)*
                     let json = serde_json::json!({
-                        "status": value,
-                        "reason": reason
+                        "code": value,
+                        "data": reason
                     });
                     (status, json)
                 },
@@ -161,7 +161,7 @@ pub fn derive_err_code(input: TokenStream) -> TokenStream {
                 }
             }
 
-            fn to_response(&self) -> (u16, serde_json::Value) {
+            fn as_response(&self) -> (u16, serde_json::Value) {
                 match self {
                     #(#response_arms)*
                 }
