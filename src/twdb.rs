@@ -68,7 +68,7 @@ impl TimeWindowDBInner {
             path: base_path.to_string(),
             ttl,
             delete_legacy,
-            current_db : LocalDB::new(db_path).await?,
+            current_db: LocalDB::new(db_path).await?,
             previous_db: None,
             created: current_time,
         })
@@ -86,13 +86,20 @@ impl TimeWindowDBInner {
         let current_time = Utc::now();
         let new_db_path = get_folder_name(&self.path, &self.ttl, &current_time)?;
         let new_db = LocalDB::new(new_db_path).await?;
-        
+
         // Handle old DB
-        if let Some(old_db) = self.previous_db.take() {
-            if self.delete_legacy {
-                // Delete old DB files
-                let old_path = format!("{}/{}", self.path, old_db.get_path());
-                std::fs::remove_dir_all(old_path)?;
+        let old_db_path =
+            if let Some(old_db) = self.previous_db.take().filter(|_old_db| self.delete_legacy) {
+                Some(old_db.get_path().to_string())
+            } else {
+                None
+            };
+
+        if let Some(old_db_path) = old_db_path {
+            if let Err(e) =
+                tokio::task::spawn_blocking(move || std::fs::remove_dir_all(old_db_path)).await
+            {
+                return Err(anyhow::anyhow!("error deleting old db: {}", e));
             }
         }
 
@@ -165,7 +172,11 @@ impl TimeWindowDB {
         Self::new(config.base_path, config.ttl, config.delete_legacy).await
     }
 
-    pub async fn new(base_path: String, ttl: Duration, delete_legacy: bool) -> anyhow::Result<Self> {
+    pub async fn new(
+        base_path: String,
+        ttl: Duration,
+        delete_legacy: bool,
+    ) -> anyhow::Result<Self> {
         let inner = TimeWindowDBInner::new(base_path, ttl, delete_legacy).await?;
         Ok(Self {
             inner: inner.into(),
