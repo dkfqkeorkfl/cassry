@@ -49,7 +49,6 @@ struct TimeWindowDBInner {
     delete_legacy: bool,
 
     current_db: LocalDB,
-    previous_db: Option<LocalDB>,
     created: chrono::DateTime<Utc>,
 }
 
@@ -69,7 +68,6 @@ impl TimeWindowDBInner {
             ttl,
             delete_legacy,
             current_db: LocalDB::new(db_path).await?,
-            previous_db: None,
             created: current_time,
         })
     }
@@ -86,27 +84,18 @@ impl TimeWindowDBInner {
         let current_time = Utc::now();
         let new_db_path = get_folder_name(&self.path, &self.ttl, &current_time)?;
         let new_db = LocalDB::new(new_db_path).await?;
+        self.created = current_time;
 
+        let current_db_path = self.current_db.get_path().to_string();
+        self.current_db = new_db;
         // Handle old DB
-        let old_db_path =
-            if let Some(old_db) = self.previous_db.take().filter(|_old_db| self.delete_legacy) {
-                Some(old_db.get_path().to_string())
-            } else {
-                None
-            };
-
-        if let Some(old_db_path) = old_db_path {
+        if self.delete_legacy {
             if let Err(e) =
-                tokio::task::spawn_blocking(move || std::fs::remove_dir_all(old_db_path)).await
+                tokio::task::spawn_blocking(move || std::fs::remove_dir_all(current_db_path)).await
             {
                 return Err(anyhow::anyhow!("error deleting old db: {}", e));
             }
         }
-
-        // Update state
-        self.previous_db = Some(self.current_db.clone());
-        self.current_db = new_db;
-        self.created = current_time;
 
         Ok(())
     }
@@ -119,38 +108,21 @@ impl TimeWindowDBInner {
     }
 
     async fn get(&self, key: String) -> anyhow::Result<Option<String>> {
-        // Try current DB first
-        match self.current_db.get(key.clone()).await? {
-            Some(value) => Ok(Some(value)),
-            None => {
-                // If not found in current DB, try previous DB
-                if let Some(prev_db) = &self.previous_db {
-                    prev_db.get(key).await
-                } else {
-                    Ok(None)
-                }
-            }
-        }
+        self.current_db.get(key.clone()).await
     }
 
     async fn delete(&mut self, key: String) -> anyhow::Result<()> {
         if self.should_rotate() {
             self.rotate_db().await?;
+        } else {
+            self.current_db.delete(key.clone()).await?;
         }
 
-        // Delete from both current and previous DB
-        self.current_db.delete(key.clone()).await?;
-        if let Some(prev_db) = &self.previous_db {
-            prev_db.delete(key).await?;
-        }
         Ok(())
     }
 
     async fn flush(&self) -> anyhow::Result<()> {
         self.current_db.flush().await?;
-        if let Some(prev_db) = &self.previous_db {
-            prev_db.flush().await?;
-        }
         Ok(())
     }
 }
