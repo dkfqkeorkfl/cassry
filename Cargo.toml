@@ -14,35 +14,35 @@ before-build = true
 
 [dependencies]
 # tags
-serde = { version = "1.0.219", features = ["derive", "rc"] }
+serde = { version = "1", features = ["derive", "rc"] }
 
-tokio = { version = "1.45.1", features = ["full"] }
-serde_json = "1.0.140"
-serde_urlencoded = "0.7.1"
+tokio = { version = "1", features = ["full"] }
+serde_json = "1"
+serde_urlencoded = "0.7"
 
-reqwest = { version = "0.12.19", features = [
+reqwest = { version = "0.12", features = [
     "json",
     "gzip",
     "deflate",
     "rustls-tls",
 ] }
 
-chrono = { version = "0.4.24", features = ["serde"] }
-anyhow = "1.0.98"
-once_cell = "1.21.3"
-log = "0.4.27"
-log4rs = "1.3.0"
-futures = "0.3.31"
-hex = "0.4.3"
-rust_decimal = { version = "1.37.1", features = ["maths", "rand", "rust-fuzz"] }
-regex = "1.11.1"
-moka = { version = "0.12.10", features = ["future"] }
+chrono = { version = "0.4", features = ["serde"] }
+anyhow = "1"
+once_cell = "1"
+log = "0.4"
+log4rs = "1"
+futures = "0.3"
+hex = "0.4"
+rust_decimal = { version = "1", features = ["maths", "rand", "rust-fuzz"] }
+regex = "1"
+moka = { version = "0.12", features = ["future"] }
 
-jsonwebtoken = "9.3.1"
-rocksdb = { version = "0.23.0", features = ["multi-threaded-cf"] }
-ring = "0.17.14"
-argon2 = "0.5.3"
+jsonwebtoken = { version = "10", features = ["aws_lc_rs"] }
+rocksdb = { version = "0.24", features = ["multi-threaded-cf"] }
+ring = "0.17"
+argon2 = "0.5"
 
-secrecy = "0.10.3"      # 최신 버전 확인 필요
-zeroize = "1.8.1"
-redis = { version = "0.32.0", features = ["tokio-comp", "cluster", "connection-manager"] }
+secrecy = "0.10"      # 최신 버전 확인 필요
+zeroize = "1"
+redis = { version = "0.32", features = ["tokio-comp", "cluster", "connection-manager"] }
