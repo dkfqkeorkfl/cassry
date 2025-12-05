@@ -89,7 +89,65 @@ pub async fn fetch_sheet(
     Ok(response)
 }
 
-pub async fn fetch_sheet_as_obj<T: Default + DeserializeOwned>(
+pub async fn fetch_sheet_to_dictionary(
+    access_token: &AccessToken,
+    sheet: &str,
+    range: &str,
+) -> anyhow::Result<HashMap<String, SecretString>> {
+    let mut sheet_value = fetch_sheet(access_token, sheet, range).await?;
+
+    let values = sheet_value
+        .values
+        .iter_mut()
+        .skip(1) // for header
+        .filter(|row| !row.is_empty())
+        .map(|row| {
+            if row.len() != 2 {
+                return Err(anyhow::anyhow!("row is not correct"));
+            }
+
+            let key = row.get(0).unwrap().expose_secret().to_string();
+            let value = row.remove(1);
+            Ok((key, value))
+        })
+        .collect::<anyhow::Result<HashMap<_, _>>>()?;
+    Ok(values)
+}
+pub async fn fetch_sheet_as_each_map(
+    access_token: &AccessToken,
+    sheet: &str,
+    range: &str,
+) -> anyhow::Result<Vec<HashMap<String, SecretString>>> {
+    let sheet_value = fetch_sheet(access_token, sheet, range).await?;
+    let headers = sheet_value
+        .values
+        .iter()
+        .next()
+        .ok_or(anyhow::anyhow!("headers not found"))?
+        .iter()
+        .map(|h| h.expose_secret().to_string())
+        .collect::<Vec<String>>();
+
+    let values = sheet_value
+        .values
+        .iter()
+        .skip(1)
+        .map(|row| {
+            row.iter()
+                .enumerate()
+                .map(|(index, value)| {
+                    let header = headers
+                        .get(index)
+                        .ok_or(anyhow::anyhow!("header not found"))?;
+                    Ok((header.clone(), value.clone()))
+                })
+                .collect::<anyhow::Result<HashMap<_, _>>>()
+        })
+        .collect::<anyhow::Result<Vec<HashMap<String, SecretString>>>>()?;
+    Ok(values)
+}
+
+pub async fn fetch_sheet_as_each_obj<T: Default + DeserializeOwned>(
     access_token: &AccessToken,
     sheet: &str,
     range: &str,
