@@ -10,6 +10,26 @@ use zeroize::ZeroizeOnDrop;
 pub struct AccountKey {
     pub client_email: SecretString,
     pub private_key: SecretString,
+
+    #[serde(rename = "type")]
+    #[serde(default)]
+    pub service_type: Option<String>,
+    #[serde(default)]
+    pub project_id: Option<String>,
+    #[serde(default)]
+    pub private_key_id: Option<String>,
+    #[serde(default)]
+    pub client_id: Option<String>,
+    #[serde(default)]
+    pub auth_uri: Option<String>,
+    #[serde(default)]
+    pub token_uri: Option<String>,
+    #[serde(default)]
+    pub auth_provider_x509_cert_url: Option<String>,
+    #[serde(default)]
+    pub client_x509_cert_url: Option<String>,
+    #[serde(default)]
+    pub universe_domain: Option<String>,
 }
 
 #[derive(Deserialize, ZeroizeOnDrop)]
