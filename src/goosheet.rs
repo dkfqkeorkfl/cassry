@@ -1,0 +1,128 @@
+use std::collections::HashMap;
+
+use jsonwebtoken;
+use reqwest;
+use secrecy::*;
+use serde::{de::DeserializeOwned, *};
+use zeroize::ZeroizeOnDrop;
+
+#[derive(Deserialize, ZeroizeOnDrop)]
+pub struct AccountKey {
+    pub client_email: SecretString,
+    pub private_key: SecretString,
+}
+
+#[derive(Deserialize, ZeroizeOnDrop)]
+pub struct AccessToken {
+    pub token_type: String,
+    pub expires_in: i64,
+
+    pub access_token: SecretString,
+}
+
+#[derive(Deserialize, ZeroizeOnDrop)]
+pub struct SheetValue {
+    pub range: String,
+    #[serde(rename = "majorDimension")]
+    pub major_dimension: String,
+
+    pub values: Vec<Vec<SecretString>>,
+}
+
+#[derive(Default, Serialize, Deserialize)]
+pub struct SheetTable<T: Default> {
+    pub headers: Vec<String>,
+    pub rows: Vec<T>,
+}
+
+pub async fn fetch_access_token(account: &AccountKey, exp: i64) -> anyhow::Result<AccessToken> {
+    let claims = serde_json::json!({
+        "iss": account.client_email.expose_secret().to_string(),
+        "scope": "https://www.googleapis.com/auth/spreadsheets.readonly".to_string(),
+        "aud": "https://oauth2.googleapis.com/token".to_string(),
+        "exp": chrono::Utc::now().timestamp() + exp,
+        "iat": chrono::Utc::now().timestamp(),
+    });
+
+    let token = jsonwebtoken::encode(
+        &jsonwebtoken::Header::new(jsonwebtoken::Algorithm::RS256),
+        &claims,
+        &jsonwebtoken::EncodingKey::from_rsa_pem(account.private_key.expose_secret().as_bytes())?,
+    )?;
+
+    let body = serde_json::json!({
+        "grant_type": "urn:ietf:params:oauth:grant-type:jwt-bearer",
+        "assertion": token
+    });
+
+    let client = reqwest::Client::new();
+    let response: AccessToken = client
+        .post("https://oauth2.googleapis.com/token")
+        .json(&body)
+        .send()
+        .await?
+        .json()
+        .await?;
+
+    Ok(response)
+}
+
+pub async fn fetch_sheet(
+    access_token: &AccessToken,
+    sheet: &str,
+    range: &str,
+) -> anyhow::Result<SheetValue> {
+    let url = format!(
+        "https://sheets.googleapis.com/v4/spreadsheets/{}/values/{}",
+        sheet, range
+    );
+
+    let client = reqwest::Client::new();
+    let response: SheetValue = client
+        .get(&url)
+        .bearer_auth(access_token.access_token.expose_secret())
+        .send()
+        .await?
+        .json()
+        .await?;
+
+    Ok(response)
+}
+
+pub async fn fetch_sheet_as_obj<T: Default + DeserializeOwned>(
+    access_token: &AccessToken,
+    sheet: &str,
+    range: &str,
+) -> anyhow::Result<SheetTable<T>> {
+    let sheet_value = fetch_sheet(access_token, sheet, range).await?;
+
+    let mut iter = sheet_value.values.iter();
+    let headers = if let Some(headers) = iter.next().filter(|h| !h.is_empty()) {
+        headers
+            .iter()
+            .map(|h| h.expose_secret().to_string())
+            .collect::<Vec<String>>()
+    } else {
+        return Ok(Default::default());
+    };
+
+    let rows = iter
+        .map(|row| {
+            let values = row
+                .iter()
+                .enumerate()
+                .map(|(index, value)| {
+                    let value = value.expose_secret().to_string();
+                    let header = headers
+                        .get(index)
+                        .ok_or(anyhow::anyhow!("header not found"))?;
+                    Ok((header, value))
+                })
+                .collect::<anyhow::Result<HashMap<_, _>>>()?;
+
+            serde_json::from_value::<T>(serde_json::json!(values)).map_err(anyhow::Error::from)
+        })
+        .collect::<anyhow::Result<Vec<T>>>()?;
+
+    Ok(SheetTable { headers, rows })
+}

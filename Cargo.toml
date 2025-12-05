@@ -16,10 +16,10 @@ before-build = true
 # tags
 serde = { version = "1", features = ["derive", "rc"] }
 
-tokio = { version = "1", features = ["full"] }
 serde_json = "1"
 serde_urlencoded = "0.7"
 
+tokio = { version = "1", features = ["full"] }
 reqwest = { version = "0.12", features = [
     "json",
     "gzip",
@@ -43,6 +43,6 @@ rocksdb = { version = "0.24", features = ["multi-threaded-cf"] }
 ring = "0.17"
 argon2 = "0.5"
 
-secrecy = "0.10"      # 최신 버전 확인 필요
-zeroize = "1"
+secrecy = { version = "0.10", features = ["serde"] }
+zeroize = { version = "1", features = ["serde", "zeroize_derive"] }
 redis = { version = "0.32", features = ["tokio-comp", "cluster", "connection-manager"] }

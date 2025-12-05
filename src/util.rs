@@ -2,52 +2,9 @@ use argon2::{password_hash::rand_core, PasswordHasher, PasswordVerifier};
 use chrono::{DateTime, TimeZone, Utc};
 use futures::Future;
 use ring::aead;
-use secrecy::SecretString;
-use serde::{Deserialize, Deserializer, Serialize};
+use serde::{Deserialize, Serialize};
 use std::cmp::Ordering;
 use zeroize::Zeroize;
-
-pub fn deserialize_secret_string<'de, D>(deserializer: D) -> Result<SecretString, D::Error>
-where
-    D: Deserializer<'de>,
-{
-    let s = String::deserialize(deserializer)?;
-    Ok(SecretString::from(s))
-}
-
-pub fn serialize_chrono_duration<S>(
-    dur: &chrono::Duration,
-    serializer: S,
-) -> Result<S::Ok, S::Error>
-where
-    S: serde::Serializer,
-{
-    let std = dur.to_std().map_err(serde::ser::Error::custom)?;
-    std.serialize(serializer)
-}
-
-pub fn deserialize_chrono_duration<'de, D>(deserializer: D) -> Result<chrono::Duration, D::Error>
-where
-    D: serde::Deserializer<'de>,
-{
-    let std = std::time::Duration::deserialize(deserializer)?;
-    chrono::Duration::from_std(std).map_err(serde::de::Error::custom)
-}
-
-pub fn serialize_anyhow_error<S>(error: &anyhow::Error, serializer: S) -> Result<S::Ok, S::Error>
-where
-    S: serde::Serializer,
-{
-    serializer.serialize_str(&error.to_string())
-}
-
-pub fn deserialize_anyhow_error<'de, D>(deserializer: D) -> Result<anyhow::Error, D::Error>
-where
-    D: serde::Deserializer<'de>,
-{
-    let message = String::deserialize(deserializer)?;
-    Ok(crate::anyhowln!("{}", message))
-}
 
 #[derive(serde::Serialize)]
 struct GoogleClaims {
@@ -123,22 +80,8 @@ pub async fn req_sheet_with_access_token(
         .await?
         .text()
         .await?;
+
     Ok(response)
-}
-
-pub async fn download_google_sheet(
-    sheet: &str,
-    tab: &str,
-    key: &str,
-) -> anyhow::Result<serde_json::Value> {
-    let url = format!(
-        "https://sheets.googleapis.com/v4/spreadsheets/{}/values/{}?key={}",
-        sheet, tab, key,
-    );
-
-    let res = reqwest::Client::new().get(url).send().await?;
-    let json = res.json().await?;
-    return Ok(json);
 }
 
 pub fn get_epoch_first() -> DateTime<Utc> {
