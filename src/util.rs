@@ -1,5 +1,5 @@
 use argon2::{password_hash::rand_core, PasswordHasher, PasswordVerifier};
-use chrono::{DateTime, TimeZone, Utc};
+use chrono::{DateTime, Duration, TimeZone, Utc};
 use futures::Future;
 use ring::aead;
 use std::cmp::Ordering;
@@ -9,9 +9,10 @@ pub fn get_epoch_first() -> DateTime<Utc> {
     Utc.timestamp_opt(0, 0).unwrap()
 }
 
-pub fn f64_to_duration(secs: f64) -> chrono::Duration {
-    let millis = (secs * 1000.0) as i64;
-    chrono::Duration::milliseconds(millis)
+/// 밀리초 단위의 i64 값을 받아서 DateTime<Utc>로 변환
+pub fn make_datetime_from_millis(millis: i64) -> DateTime<Utc> {
+    // 밀리초 단위 Duration을 더해줌 (음수도 지원)
+    get_epoch_first() + Duration::milliseconds(millis)
 }
 
 pub fn verify_password(origin: &str, hashed: &str) -> anyhow::Result<()> {
@@ -36,7 +37,11 @@ pub fn hash_password(data: &str) -> anyhow::Result<String> {
     Ok(hash)
 }
 
-pub fn decrypt_str_by_aes_gcm_128(key: &[u8], iv: &[u8], mut cipher: Vec<u8>) -> anyhow::Result<secrecy::SecretString> {
+pub fn decrypt_str_by_aes_gcm_128(
+    key: &[u8],
+    iv: &[u8],
+    mut cipher: Vec<u8>,
+) -> anyhow::Result<secrecy::SecretString> {
     // 2. 입력 유효성 검사
     if key.len() != 16 {
         return Err(crate::anyhowln!("AES-128 requires 16-byte key"));
@@ -63,7 +68,11 @@ pub fn decrypt_str_by_aes_gcm_128(key: &[u8], iv: &[u8], mut cipher: Vec<u8>) ->
     Ok(secret)
 }
 
-pub fn encrypt_str_by_aes_gcm_128(key: &[u8], iv: &[u8], plaintext: &str) -> anyhow::Result<Vec<u8>> {
+pub fn encrypt_str_by_aes_gcm_128(
+    key: &[u8],
+    iv: &[u8],
+    plaintext: &str,
+) -> anyhow::Result<Vec<u8>> {
     if key.len() != 16 {
         return Err(crate::anyhowln!("AES-128 requires 16-byte key"));
     }
@@ -85,7 +94,6 @@ pub fn encrypt_str_by_aes_gcm_128(key: &[u8], iv: &[u8], plaintext: &str) -> any
 
     Ok(in_out)
 }
-
 
 /// Performs an asynchronous binary search.
 ///
