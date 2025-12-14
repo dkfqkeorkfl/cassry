@@ -42,6 +42,8 @@ jsonwebtoken = { version = "10", features = ["aws_lc_rs"] }
 rocksdb = { version = "0.24", features = ["multi-threaded-cf"] }
 ring = "0.17"
 argon2 = "0.5"
+blake2 = "0.10"
+hmac = "0.12"
 
 secrecy = { version = "0.10", features = ["serde"] }
 zeroize = { version = "1", features = ["serde", "zeroize_derive"] }

@@ -1,6 +1,8 @@
 use argon2::{password_hash::rand_core, PasswordHasher, PasswordVerifier};
+use blake2::{Blake2b512, Blake2bVar, digest::VariableOutput};
 use chrono::{DateTime, Duration, TimeZone, Utc};
 use futures::Future;
+use hmac::{Mac, SimpleHmac};
 use ring::aead;
 use std::cmp::Ordering;
 use zeroize::Zeroize;
@@ -35,6 +37,39 @@ pub fn hash_password(data: &str) -> anyhow::Result<String> {
         .map_err(|e| crate::anyhowln!("{}", e.to_string()))?
         .to_string();
     Ok(hash)
+}
+
+/// 가변 길이 HMAC-BLAKE2b 해시 함수
+/// 
+/// 1. 키와 메시지로 HMAC-BLAKE2b 다이제스트를 계산합니다.
+/// 2. 그 결과를 BLAKE2b 가변 길이 해시의 입력으로 사용하여 지정된 길이의 해시를 생성합니다.
+/// `output_len`은 바이트 단위입니다 (1-64 바이트).
+/// 
+/// 참고: 단순 Truncate 방식으로 자르는 것이 아니라, BLAKE2b로 hmac를 생성한 값을 다시 가변길이 해시로 생성하는 방식을 사용합니다.
+pub fn hmac_blake2b_with_len(key: &[u8], message: &[u8], output_len: usize) -> anyhow::Result<Vec<u8>> {
+    if ! (1..64).contains(&output_len) {
+        return Err(crate::anyhowln!("output_len must be between 1 and 64 bytes"));
+    }
+    
+    // 1단계: HMAC-BLAKE2b 다이제스트 계산
+    // 참고: BLAKE2b는 lazy processing 해시 함수이므로 SimpleHmac을 사용해야 합니다.
+    // Hmac은 블록 레벨 API를 가진 해시 함수(SHA-2 등)에만 사용 가능합니다.
+    type HmacBlake2b = SimpleHmac<Blake2b512>;
+    let mut mac = HmacBlake2b::new_from_slice(key)
+        .map_err(|e| crate::anyhowln!("Invalid key length: {}", e))?;
+    <HmacBlake2b as Mac>::update(&mut mac, message);
+    let hmac_result = mac.finalize();
+    let hmac_bytes = hmac_result.into_bytes();
+    
+    // 2단계: HMAC 결과를 BLAKE2b 가변 길이 해시의 입력으로 사용
+    let mut hasher = Blake2bVar::new(output_len)
+        .map_err(|e| crate::anyhowln!("Failed to create Blake2bVar: {}", e))?;
+    blake2::digest::Update::update(&mut hasher, &hmac_bytes);
+    let mut buf = vec![0u8; output_len];
+    hasher.finalize_variable(&mut buf)
+        .map_err(|e| crate::anyhowln!("Failed to finalize hash: {}", e))?;
+    
+    Ok(buf)
 }
 
 pub fn decrypt_str_by_aes_gcm_128(
