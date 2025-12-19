@@ -18,6 +18,10 @@ pub use regex;
 pub use secrecy;
 pub use zeroize;
 pub use moka;
+pub use blake3;
+pub use postcard;
+pub use base64;
+
 
 pub mod cache;
 pub mod cache_customed;
