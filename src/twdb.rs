@@ -1,4 +1,5 @@
 use chrono::{DateTime, Duration, TimeZone, Utc};
+use serde::{Deserialize, Serialize};
 use std::fs;
 use std::path::Path;
 use tokio::sync::RwLock;
@@ -49,7 +50,8 @@ struct TimeWindowDBInner {
     delete_legacy: bool,
 
     current_db: LocalDB,
-    created: chrono::DateTime<Utc>,
+    created_at: chrono::DateTime<Utc>,
+    updated_at: chrono::DateTime<Utc>,
 }
 
 impl TimeWindowDBInner {
@@ -68,12 +70,13 @@ impl TimeWindowDBInner {
             ttl,
             delete_legacy,
             current_db: LocalDB::new(db_path).await?,
-            created: current_time,
+            updated_at: current_time,
+            created_at: current_time,
         })
     }
 
     fn should_rotate(&self) -> bool {
-        (Utc::now() - self.created) >= self.ttl
+        (Utc::now() - self.updated_at) >= self.ttl
     }
 
     async fn rotate_db(&mut self) -> anyhow::Result<()> {
@@ -84,7 +87,7 @@ impl TimeWindowDBInner {
         let current_time = Utc::now();
         let new_db_path = get_folder_name(&self.path, &self.ttl, &current_time)?;
         let new_db = LocalDB::new(new_db_path).await?;
-        self.created = current_time;
+        self.updated_at = current_time;
 
         let current_db_path = self.current_db.get_path().to_string();
         self.current_db = new_db;
@@ -100,25 +103,47 @@ impl TimeWindowDBInner {
         Ok(())
     }
 
-    async fn put(&mut self, key: String, value: String) -> anyhow::Result<()> {
+    async fn put(&mut self, key: Vec<u8>, value: Vec<u8>) -> anyhow::Result<()> {
         if self.should_rotate() {
             self.rotate_db().await?;
         }
         self.current_db.put(key, value).await
     }
 
-    async fn get(&self, key: String) -> anyhow::Result<Option<String>> {
-        self.current_db.get(key.clone()).await
+    async fn get(&self, key: Vec<u8>) -> anyhow::Result<Option<Vec<u8>>> {
+        self.current_db.get(key).await
     }
 
-    async fn delete(&mut self, key: String) -> anyhow::Result<()> {
+    async fn delete(&mut self, key: Vec<u8>) -> anyhow::Result<()> {
         if self.should_rotate() {
             self.rotate_db().await?;
         } else {
-            self.current_db.delete(key.clone()).await?;
+            self.current_db.delete(key).await?;
         }
 
         Ok(())
+    }
+
+    async fn put_json<T: Serialize>(&mut self, key: String, value: &T) -> anyhow::Result<()> {
+        if self.should_rotate() {
+            self.rotate_db().await?;
+        }
+
+        self.current_db.put_json(key, value).await
+    }
+
+    async fn get_json<T>(&self, key: String) -> anyhow::Result<Option<T>>
+    where
+        T: for<'de> Deserialize<'de>,
+    {
+        self.current_db.get_json::<T>(key).await
+    }
+
+    async fn delete_json(&mut self, key: String) -> anyhow::Result<()> {
+        if self.should_rotate() {
+            self.rotate_db().await?;
+        }
+        self.current_db.delete_json(key).await
     }
 
     async fn flush(&self) -> anyhow::Result<()> {
@@ -155,17 +180,17 @@ impl TimeWindowDB {
         })
     }
 
-    pub async fn put(&self, key: String, value: String) -> anyhow::Result<()> {
+    pub async fn put(&self, key: Vec<u8>, value: Vec<u8>) -> anyhow::Result<()> {
         let mut inner = self.inner.write().await;
         inner.put(key, value).await
     }
 
-    pub async fn get(&self, key: String) -> anyhow::Result<Option<String>> {
+    pub async fn get(&self, key: Vec<u8>) -> anyhow::Result<Option<Vec<u8>>> {
         let inner = self.inner.read().await;
         inner.get(key).await
     }
 
-    pub async fn delete(&self, key: String) -> anyhow::Result<()> {
+    pub async fn delete(&self, key: Vec<u8>) -> anyhow::Result<()> {
         let mut inner = self.inner.write().await;
         inner.delete(key).await
     }
@@ -173,5 +198,30 @@ impl TimeWindowDB {
     pub async fn flush(&self) -> anyhow::Result<()> {
         let inner = self.inner.read().await;
         inner.flush().await
+    }
+
+    pub async fn get_created_at(&self) -> chrono::DateTime<Utc> {
+        let inner = self.inner.read().await;
+        inner.created_at
+    }
+
+    pub async fn get_updated_at(&self) -> chrono::DateTime<Utc> {
+        let inner = self.inner.read().await;
+        inner.updated_at
+    }
+
+    pub async fn put_json<T: Serialize>(&self, key: String, value: &T) -> anyhow::Result<()> {
+        self.inner.write().await.put_json(key, value).await
+    }
+
+    pub async fn get_json<T>(&self, key: String) -> anyhow::Result<Option<T>>
+    where
+        T: for<'de> Deserialize<'de>,
+    {
+        self.inner.read().await.get_json::<T>(key).await
+    }
+
+    pub async fn delete_json(&self, key: String) -> anyhow::Result<()> {
+        self.inner.write().await.delete_json(key).await
     }
 }

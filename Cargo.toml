@@ -40,7 +40,7 @@ jsonwebtoken = { version = "10", features = ["aws_lc_rs"] }
 ring = "0.17"
 argon2 = "0.5"
 blake3 = "1.8"
-hmac = "0.12"
+# hmac = "0.12"
 secrecy = { version = "0.10", features = ["serde"] }
 zeroize = { version = "1", features = ["serde", "zeroize_derive"] }
 

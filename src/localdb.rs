@@ -89,10 +89,15 @@ impl TransactionWrapper {
         // pending operations에 없으면 데이터베이스에서 조회
         let inner = self.inner.clone();
         task::spawn_blocking(move || {
-            Ok(inner
-                .db
-                .get_opt(key.as_bytes(), &inner.read_opts)?
-                .map(|bytes| String::from_utf8_lossy(&bytes).to_string()))
+            let result = inner.get(key.as_bytes()).and_then(|bytes| {
+                let result = if let Some(bytes) = bytes {
+                    Some(String::from_utf8(bytes)?)
+                } else {
+                    None
+                };
+                Ok(result)
+            })?;
+            Ok(result)
         })
         .await?
     }
@@ -219,22 +224,19 @@ impl LocalDBInner {
         })
     }
 
-    fn put(&self, key: &str, value: &str) -> anyhow::Result<()> {
+    fn put(&self, key: &[u8], value: &[u8]) -> anyhow::Result<()> {
         self.db
-            .put_opt(key.as_bytes(), value.as_bytes(), &self.write_opts)
+            .put_opt(key, value, &self.write_opts)
             .map_err(anyhow::Error::from)
     }
 
-    fn get(&self, key: &str) -> anyhow::Result<Option<String>> {
-        Ok(self
-            .db
-            .get_opt(key.as_bytes(), &self.read_opts)?
-            .map(|bytes| String::from_utf8_lossy(&bytes).to_string()))
+    fn get(&self, key: &[u8]) -> anyhow::Result<Option<Vec<u8>>> {
+        Ok(self.db.get_opt(key, &self.read_opts)?)
     }
 
-    fn delete(&self, key: &str) -> anyhow::Result<()> {
+    fn delete(&self, key: &[u8]) -> anyhow::Result<()> {
         self.db
-            .delete_opt(key.as_bytes(), &self.write_opts)
+            .delete_opt(key, &self.write_opts)
             .map_err(anyhow::Error::from)
     }
 
@@ -357,26 +359,34 @@ impl LocalDB {
         })
     }
 
-    pub async fn put(&self, key: String, value: String) -> anyhow::Result<()> {
+    pub async fn put(&self, key: Vec<u8>, value: Vec<u8>) -> anyhow::Result<()> {
         let inner = self.inner.clone();
         task::spawn_blocking(move || inner.put(&key, &value)).await?
     }
 
-    pub async fn get(&self, key: String) -> anyhow::Result<Option<String>> {
+    pub async fn get(&self, key: Vec<u8>) -> anyhow::Result<Option<Vec<u8>>> {
         let inner = self.inner.clone();
         task::spawn_blocking(move || inner.get(&key)).await?
+    }
+
+    pub async fn delete(&self, key: Vec<u8>) -> anyhow::Result<()> {
+        let inner = self.inner.clone();
+        task::spawn_blocking(move || inner.delete(&key)).await?
     }
 
     pub async fn get_json<T>(&self, key: String) -> anyhow::Result<Option<T>>
     where
         T: for<'de> Deserialize<'de>,
     {
-        match self.get(key).await? {
-            Some(json_str) => {
-                let value = serde_json::from_str(&json_str)?;
-                Ok(Some(value))
-            }
-            None => Ok(None),
+        let inner = self.inner.clone();
+        if let Some(result) = task::spawn_blocking(move || inner.get(key.as_bytes()))
+            .await??
+            .map(|v| String::from_utf8(v))
+        {
+            let value: T = serde_json::from_str(&result?)?;
+            Ok(Some(value))
+        } else {
+            Ok(None)
         }
     }
 
@@ -385,12 +395,13 @@ impl LocalDB {
         T: Serialize,
     {
         let json_str = serde_json::to_string(value)?;
-        self.put(key, json_str).await
+        let inner = self.inner.clone();
+        task::spawn_blocking(move || inner.put(key.as_bytes(), json_str.as_bytes())).await?
     }
 
-    pub async fn delete(&self, key: String) -> anyhow::Result<()> {
+    pub async fn delete_json(&self, key: String) -> anyhow::Result<()> {
         let inner = self.inner.clone();
-        task::spawn_blocking(move || inner.delete(&key)).await?
+        task::spawn_blocking(move || inner.delete(key.as_bytes())).await?
     }
 
     pub fn get_path(&self) -> &str {
