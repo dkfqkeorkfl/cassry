@@ -18,6 +18,26 @@ pub mod datetime_milliseconds {
     }
 }
 
+pub mod duration_milliseconds {
+    use chrono::Duration;
+    use serde::{Deserialize, Deserializer, Serializer};
+
+    pub fn serialize<S>(duration: &Duration, serializer: S) -> Result<S::Ok, S::Error>
+    where
+        S: Serializer,
+    {
+        serializer.serialize_i64(duration.num_milliseconds())
+    }
+
+    pub fn deserialize<'de, D>(deserializer: D) -> Result<Duration, D::Error>
+    where
+        D: Deserializer<'de>,
+    {
+        let millis = i64::deserialize(deserializer)?;
+        Ok(Duration::milliseconds(millis))
+    }
+}
+
 pub mod anyhow_error {
     use serde::Deserialize;
 

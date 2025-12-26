@@ -1,14 +1,19 @@
 use chrono::{DateTime, Utc};
+use keyed_lock::r#async::KeyedLock;
 use rocksdb::{
     BlockBasedOptions, Cache, DBCompressionType, DBWithThreadMode, IteratorMode, MultiThreaded,
     Options, ReadOptions, WriteOptions,
 };
 use serde::{Deserialize, Serialize};
+use std::collections::HashMap;
 use std::{path::Path, sync::Arc};
+use tokio::sync::{Mutex, RwLock};
 use tokio::task;
 
+use crate::RwArc;
+
 use super::localdb::LocalDB;
-use super::serialization::datetime_milliseconds;
+use super::serialization::{datetime_milliseconds, duration_milliseconds};
 /// TTL 인덱스 내부 블로킹 구현체
 ///
 /// 이 구조체는 TTL 인덱스를 관리하며, 실제 TTL DB가 아닙니다.
@@ -357,7 +362,10 @@ impl TTLIndex {
     /// # Ok(())
     /// # }
     /// ```
-    pub async fn scan_expired(&self, now: DateTime<Utc>) -> anyhow::Result<Vec<(Vec<u8>, Vec<u8>)>> {
+    pub async fn scan_expired(
+        &self,
+        now: DateTime<Utc>,
+    ) -> anyhow::Result<Vec<(Vec<u8>, Vec<u8>)>> {
         let inner = self.inner.clone();
         task::spawn_blocking(move || inner.scan_expired(now)).await?
     }
@@ -417,18 +425,18 @@ impl TTLIndex {
 /// - Live: 활성 상태, 특정 시간 이후 만료
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub enum ExpiredAt {
-    #[serde(with = "datetime_milliseconds")]
-    Idle(DateTime<Utc>),
+    #[serde(with = "duration_milliseconds")]
+    Idle(chrono::Duration),
     #[serde(with = "datetime_milliseconds")]
     Live(DateTime<Utc>),
 }
 
 impl ExpiredAt {
     /// DateTime<Utc>를 반환합니다.
-    pub fn datetime(&self) -> &DateTime<Utc> {
+    pub fn expire_at(&self, now: &DateTime<Utc>) -> DateTime<Utc> {
         match self {
-            ExpiredAt::Idle(dt) => dt,
-            ExpiredAt::Live(dt) => dt,
+            ExpiredAt::Idle(duration) => *now + *duration,
+            ExpiredAt::Live(dt) => *dt,
         }
     }
 }
@@ -444,12 +452,20 @@ struct AccessDBValue2025121601 {
     pub updated_at: DateTime<Utc>,
     pub value: Vec<u8>,
 }
+
+impl AccessDBValue2025121601 {
+    pub fn expire_at(&self) -> DateTime<Utc> {
+        self.expired_at.expire_at(&self.updated_at)
+    }
+}
+
 type AccessDBValue = AccessDBValue2025121601;
 
 /// LocalDBTTL 내부 구현체
 pub struct LocalDBTTL {
     access_db: Arc<LocalDB>,
     ttl_index: Arc<TTLIndex>,
+    locks: Arc<KeyedLock<Vec<u8>>>,
     path: String,
     created_at: DateTime<Utc>,
 }
@@ -470,6 +486,7 @@ impl LocalDBTTL {
         Ok(Self {
             access_db: Arc::new(access_db),
             ttl_index: Arc::new(ttl_index),
+            locks: Arc::new(KeyedLock::new()),
             path: base_path,
             created_at: Utc::now(),
         })
@@ -501,12 +518,12 @@ impl LocalDBTTL {
         // postcard로 직렬화
         let serialized = postcard::to_stdvec(&db_value)?;
 
+        let _guard = self.locks.lock(key.clone()).await;
         // AccessDB에 저장
         self.access_db.put(key.clone(), serialized).await?;
 
         // TTL 인덱스에 추가
-        self.ttl_index.insert(*expired_at.datetime(), &key).await?;
-
+        self.ttl_index.insert(db_value.expire_at(), &key).await?;
         Ok(())
     }
 
@@ -520,6 +537,7 @@ impl LocalDBTTL {
     /// # Returns
     /// * `Option<(AccessDBValue, bool)>` - (값, updated 여부)
     pub async fn get(&self, key: Vec<u8>) -> anyhow::Result<Option<Vec<u8>>> {
+        let _guard = self.locks.lock(key.clone()).await;
         // AccessDB에서 조회
         let serialized = match self.access_db.get(key.clone()).await? {
             Some(data) => data,
@@ -530,8 +548,7 @@ impl LocalDBTTL {
         let mut db_value: AccessDBValue = postcard::from_bytes(&serialized)?;
 
         let now = Utc::now();
-
-        if now > *db_value.expired_at.datetime() {
+        if now > db_value.expire_at() {
             self.delete(key).await?;
             return Ok(None);
         }
@@ -539,8 +556,11 @@ impl LocalDBTTL {
         // idle 상태이고 아직 만료되지 않았으면 updated_at 업데이트
         match &db_value.expired_at {
             ExpiredAt::Idle(_) => {
+                self.ttl_index.remove(db_value.expire_at(), &key).await?;
+
                 db_value.updated_at = now;
                 let serialized = postcard::to_stdvec(&db_value)?;
+                self.ttl_index.insert(db_value.expire_at(), &key).await?;
                 self.access_db.put(key, serialized).await?;
                 Ok(Some(db_value.value))
             }
@@ -553,6 +573,7 @@ impl LocalDBTTL {
     /// # Arguments
     /// * `key` - 키 (Vec<u8>)
     pub async fn delete(&self, key: Vec<u8>) -> anyhow::Result<()> {
+        let _guard = self.locks.lock(key.clone()).await;
         // AccessDB에서 조회하여 expired_at 확인
         if let Some(serialized) = self.access_db.get(key.clone()).await? {
             if let Ok(db_value) = postcard::from_bytes::<AccessDBValue>(&serialized) {
