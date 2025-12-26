@@ -112,25 +112,42 @@ impl TTLIndexInner {
         })
     }
 
-    /// expire_at(i64)를 big-endian bytes로 변환
+    /// timestamp와 key를 조합하여 RocksDB key로 변환
     ///
-    /// RocksDB의 정렬 순서를 이용하기 위해 big-endian으로 변환합니다.
-    /// 이렇게 하면 timestamp가 작은 값부터 큰 값 순으로 정렬됩니다.
-    fn timestamp_to_key(expire_at: i64) -> [u8; 8] {
-        expire_at.to_be_bytes()
+    /// 형식: timestamp (8 bytes, big-endian) + key (variable length)
+    /// RocksDB의 정렬 순서를 이용하기 위해 timestamp를 big-endian으로 변환합니다.
+    /// 이렇게 하면 timestamp가 작은 값부터 큰 값 순으로 정렬되고,
+    /// 같은 timestamp의 경우 key 순으로 정렬됩니다.
+    fn timestamp_and_key_to_db_key(expire_at: &DateTime<Utc>, key: &[u8]) -> Vec<u8> {
+        let mut db_key = expire_at.timestamp_millis().to_be_bytes().to_vec();
+        db_key.extend_from_slice(key);
+        db_key
     }
 
-    /// big-endian bytes를 i64로 변환
-    fn key_to_timestamp(key: &[u8]) -> anyhow::Result<i64> {
-        if key.len() != 8 {
+    /// RocksDB key에서 timestamp를 추출
+    ///
+    /// 형식: timestamp (8 bytes, big-endian) + key (variable length)
+    fn db_key_to_timestamp(db_key: &[u8]) -> anyhow::Result<i64> {
+        if db_key.len() < 8 {
             return Err(anyhow::anyhow!(
-                "Invalid key length: expected 8 bytes, got {}",
-                key.len()
+                "Invalid key length: expected at least 8 bytes, got {}",
+                db_key.len()
             ));
         }
         let mut bytes = [0u8; 8];
-        bytes.copy_from_slice(key);
+        bytes.copy_from_slice(&db_key[..8]);
         Ok(i64::from_be_bytes(bytes))
+    }
+
+    /// RocksDB key에서 원본 key를 추출
+    ///
+    /// 형식: timestamp (8 bytes, big-endian) + key (variable length)
+    fn db_key_to_key(db_key: &[u8]) -> Vec<u8> {
+        if db_key.len() <= 8 {
+            Vec::new()
+        } else {
+            db_key[8..].to_vec()
+        }
     }
 
     /// TTL 인덱스에 항목을 추가합니다.
@@ -140,13 +157,13 @@ impl TTLIndexInner {
     /// * `key` - AccessDB의 키 (Vec<u8>)
     ///
     /// # RocksDB 구조
-    /// - RocksDB key: expire_at(i64) as big-endian bytes (8 bytes)
-    /// - RocksDB value: AccessDB key (Vec<u8>)
+    /// - RocksDB key: timestamp (8 bytes, big-endian) + key (variable length)
+    /// - RocksDB value: 빈 값 (구별을 위한 용도만, 실제 데이터는 AccessDB에 저장)
     fn insert(&self, expire_at: DateTime<Utc>, key: &[u8]) -> anyhow::Result<()> {
-        let timestamp = expire_at.timestamp();
-        let db_key = Self::timestamp_to_key(timestamp);
+        let db_key = Self::timestamp_and_key_to_db_key(&expire_at, key);
+        // value는 빈 값으로 저장 (키 구별을 위한 용도)
         self.db
-            .put_opt(&db_key, key, &self.write_opts)
+            .put_opt(&db_key, &[], &self.write_opts)
             .map_err(anyhow::Error::from)
     }
 
@@ -156,25 +173,10 @@ impl TTLIndexInner {
     /// * `expire_at` - 만료 시간 (DateTime<Utc>)
     /// * `key` - AccessDB의 키 (Vec<u8>)
     fn remove(&self, expire_at: DateTime<Utc>, key: &[u8]) -> anyhow::Result<()> {
-        let timestamp = expire_at.timestamp();
-        let db_key = Self::timestamp_to_key(timestamp);
-
-        // 현재 key에 대한 값을 조회하여 일치하는지 확인
-        if let Some(existing_value) = self.db.get_opt(&db_key, &self.read_opts)? {
-            if existing_value == key {
-                // 값이 일치하면 삭제
-                self.db
-                    .delete_opt(&db_key, &self.write_opts)
-                    .map_err(anyhow::Error::from)
-            } else {
-                // 값이 다르면 해당 expire_at에는 다른 key가 있음
-                // 삭제하지 않음
-                Ok(())
-            }
-        } else {
-            // 이미 존재하지 않음
-            Ok(())
-        }
+        let db_key = Self::timestamp_and_key_to_db_key(&expire_at, key);
+        self.db
+            .delete_opt(&db_key, &self.write_opts)
+            .map_err(anyhow::Error::from)
     }
 
     /// 만료된 항목들을 스캔합니다.
@@ -187,8 +189,8 @@ impl TTLIndexInner {
     ///
     /// # Returns
     /// * `Vec<(i64, Vec<u8>)>` - 만료된 항목들의 리스트 (timestamp, AccessDB key)
-    fn scan_expired(&self, now: DateTime<Utc>) -> anyhow::Result<Vec<(i64, Vec<u8>)>> {
-        let now_timestamp = now.timestamp();
+    fn scan_expired(&self, now: DateTime<Utc>) -> anyhow::Result<Vec<(Vec<u8>, Vec<u8>)>> {
+        let now = now.timestamp_millis();
         let mut results = Vec::new();
 
         // Iterator를 사용하여 앞에서부터 순차적으로 만료된 항목들을 스캔
@@ -196,12 +198,13 @@ impl TTLIndexInner {
         let iter = self.db.iterator(IteratorMode::Start);
 
         for item in iter {
-            let (key, value) = item?;
-            let timestamp = Self::key_to_timestamp(&key)?;
+            let (db_key, _) = item?;
+            let timestamp = Self::db_key_to_timestamp(&db_key)?;
 
             // now_timestamp 이하인 경우에만 추가
-            if timestamp <= now_timestamp {
-                results.push((timestamp, value.to_vec()));
+            if timestamp <= now {
+                let key = Self::db_key_to_key(&db_key);
+                results.push((db_key.into_vec(), key));
             } else {
                 // timestamp가 정렬되어 있으므로 이후 항목은 모두 만료되지 않음
                 break;
@@ -218,24 +221,20 @@ impl TTLIndexInner {
     ///
     /// # Returns
     /// * `usize` - 삭제된 항목의 개수
-    fn delete_expired(&self, now: DateTime<Utc>) -> anyhow::Result<usize> {
-        let expired = self.scan_expired(now)?;
-        let count = expired.len();
-
+    fn delete_expired(&self, expired: Vec<(Vec<u8>, Vec<u8>)>) -> anyhow::Result<()> {
         // 삭제할 항목들을 WriteBatch로 일괄 삭제
         let mut batch = rocksdb::WriteBatch::default();
-        for (timestamp, _) in &expired {
-            let db_key = Self::timestamp_to_key(*timestamp);
+        for (db_key, _key) in &expired {
             batch.delete(&db_key);
         }
 
-        if count > 0 {
+        if expired.len() > 0 {
             self.db
                 .write_opt(batch, &self.write_opts)
                 .map_err(anyhow::Error::from)?;
         }
 
-        Ok(count)
+        Ok(())
     }
 
     /// 데이터베이스 경로를 반환합니다.
@@ -358,7 +357,7 @@ impl TTLIndex {
     /// # Ok(())
     /// # }
     /// ```
-    pub async fn scan_expired(&self, now: DateTime<Utc>) -> anyhow::Result<Vec<(i64, Vec<u8>)>> {
+    pub async fn scan_expired(&self, now: DateTime<Utc>) -> anyhow::Result<Vec<(Vec<u8>, Vec<u8>)>> {
         let inner = self.inner.clone();
         task::spawn_blocking(move || inner.scan_expired(now)).await?
     }
@@ -385,9 +384,9 @@ impl TTLIndex {
     /// # Ok(())
     /// # }
     /// ```
-    pub async fn delete_expired(&self, now: DateTime<Utc>) -> anyhow::Result<usize> {
+    pub async fn delete_expired(&self, expired: Vec<(Vec<u8>, Vec<u8>)>) -> anyhow::Result<()> {
         let inner = self.inner.clone();
-        task::spawn_blocking(move || inner.delete_expired(now)).await?
+        task::spawn_blocking(move || inner.delete_expired(expired)).await?
     }
 
     /// 데이터베이스 경로를 반환합니다.
