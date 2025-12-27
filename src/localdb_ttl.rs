@@ -488,7 +488,7 @@ impl ExpiredAt {
 ///
 /// postcard로 직렬화되어 저장됩니다.
 #[derive(Debug, Clone, Serialize, Deserialize)]
-struct AccessDBValue2025121601 {
+struct DBSchema2025121601 {
     pub ver: u32,
     pub expired_at: ExpiredAt,
     #[serde(with = "datetime_milliseconds")]
@@ -496,13 +496,13 @@ struct AccessDBValue2025121601 {
     pub value: Vec<u8>,
 }
 
-impl AccessDBValue2025121601 {
+impl DBSchema2025121601 {
     pub fn expire_at(&self) -> DateTime<Utc> {
         self.expired_at.expire_at(&self.updated_at)
     }
 }
 
-type AccessDBValue = AccessDBValue2025121601;
+type DBSchema = DBSchema2025121601;
 struct Context {
     access_db: LocalDB,
     ttl_index: TTLIndex,
@@ -514,7 +514,7 @@ pub struct LocalDBTTL {
     ctx: Arc<Context>,
     path: String,
     created_at: DateTime<Utc>,
-    task: JoinHandle<()>,
+    _task: JoinHandle<()>,
 }
 
 impl LocalDBTTL {
@@ -553,7 +553,7 @@ impl LocalDBTTL {
             ctx: context,
             path,
             created_at: Utc::now(),
-            task,
+            _task: task,
         })
     }
 
@@ -585,7 +585,7 @@ impl LocalDBTTL {
     ) -> anyhow::Result<()> {
         // AccessDBValue 생성
         let now = Utc::now();
-        let new_item = AccessDBValue {
+        let new_item = DBSchema {
             ver: Self::VERSION,
             expired_at: expired_at.clone(),
             updated_at: now,
@@ -595,7 +595,7 @@ impl LocalDBTTL {
 
         let _guard = self.ctx.locks.lock(key.clone()).await;
         if let Some(serialized) = self.ctx.access_db.get(key.clone()).await? {
-            let db_value: AccessDBValue = postcard::from_bytes(&serialized)?;
+            let db_value: DBSchema = postcard::from_bytes(&serialized)?;
             self.ctx
                 .ttl_index
                 .remove(db_value.expire_at(), &key)
@@ -633,7 +633,7 @@ impl LocalDBTTL {
 
         // postcard로 역직렬화
         // 추후에는 버전 별 분기 처리 필요
-        let mut db_value: AccessDBValue = postcard::from_bytes(&serialized)?;
+        let mut db_value: DBSchema = postcard::from_bytes(&serialized)?;
 
         let now = Utc::now();
         if now > db_value.expire_at() {
@@ -674,7 +674,7 @@ impl LocalDBTTL {
         let _guard = self.ctx.locks.lock(key.clone()).await;
         // AccessDB에서 조회하여 expired_at 확인
         if let Some(serialized) = self.ctx.access_db.get(key.clone()).await? {
-            let db_value: AccessDBValue = postcard::from_bytes(&serialized)?;
+            let db_value: DBSchema = postcard::from_bytes(&serialized)?;
             // TTL 인덱스에서 제거
             self.ctx
                 .ttl_index
