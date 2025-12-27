@@ -176,8 +176,8 @@ impl TTLIndexInner {
     ///
     /// # Returns
     /// * `bool` - 항목이 존재하면 true, 없으면 false
-    fn includes(&self, key: &[u8]) -> anyhow::Result<bool> {
-        match self.db.get_opt(&key, &self.read_opts)? {
+    fn includes(&self, combined_key: &[u8]) -> anyhow::Result<bool> {
+        match self.db.get_opt(&combined_key, &self.read_opts)? {
             Some(_) => Ok(true),
             None => Ok(false),
         }
@@ -503,12 +503,15 @@ impl AccessDBValue2025121601 {
 }
 
 type AccessDBValue = AccessDBValue2025121601;
+struct Context {
+    access_db: LocalDB,
+    ttl_index: TTLIndex,
+    locks: KeyedLock<Vec<u8>>
+}
 
 /// LocalDBTTL 내부 구현체
 pub struct LocalDBTTL {
-    access_db: Arc<LocalDB>,
-    ttl_index: Arc<TTLIndex>,
-    locks: Arc<KeyedLock<Vec<u8>>>,
+    ctx : Arc<Context>,
     path: String,
     created_at: DateTime<Utc>,
 }
@@ -527,9 +530,11 @@ impl LocalDBTTL {
         let ttl_index = TTLIndex::new(ttl_index_path).await?;
 
         Ok(Self {
-            access_db: Arc::new(access_db),
-            ttl_index: Arc::new(ttl_index),
-            locks: Arc::new(KeyedLock::new()),
+            ctx: Arc::new(Context {
+                access_db,
+                ttl_index,
+                locks: KeyedLock::new(),
+            }),
             path: base_path,
             created_at: Utc::now(),
         })
@@ -537,14 +542,14 @@ impl LocalDBTTL {
 
     pub async fn delete_expired(&self) -> anyhow::Result<()> {
         let now = Utc::now();
-        let expired = self.ttl_index.scan_expired(now).await?;
+        let expired = self.ctx.ttl_index.scan_expired(now).await?;
         for (index, key) in &expired {
-            let _guard = self.locks.lock(key.clone()).await;
-            if self.ttl_index.includes(&index).await? {
-                self.access_db.delete(key.clone()).await?;
+            let _guard = self.ctx.locks.lock(key.clone()).await;
+            if self.ctx.ttl_index.includes(&index).await? {
+                self.ctx.access_db.delete(key.clone()).await?;
             }
         }
-        self.ttl_index.delete_expired(expired).await?;
+        self.ctx.ttl_index.delete_expired(expired).await?;
         Ok(())
     }
 
@@ -571,17 +576,17 @@ impl LocalDBTTL {
         };
         let serialized = postcard::to_stdvec(&new_item)?;
 
-        let _guard = self.locks.lock(key.clone()).await;
-        if let Some(serialized) = self.access_db.get(key.clone()).await? {
+        let _guard = self.ctx.locks.lock(key.clone()).await;
+        if let Some(serialized) = self.ctx.access_db.get(key.clone()).await? {
             let db_value: AccessDBValue = postcard::from_bytes(&serialized)?;
-            self.ttl_index.remove(db_value.expire_at(), &key).await?;
+            self.ctx.ttl_index.remove(db_value.expire_at(), &key).await?;
         }
 
         // AccessDB에 저장
-        self.access_db.put(key.clone(), serialized).await?;
+        self.ctx.access_db.put(key.clone(), serialized).await?;
 
         // TTL 인덱스에 추가
-        self.ttl_index.insert(new_item.expire_at(), &key).await?;
+        self.ctx.ttl_index.insert(new_item.expire_at(), &key).await?;
 
         Ok(())
     }
@@ -596,9 +601,9 @@ impl LocalDBTTL {
     /// # Returns
     /// * `Option<(AccessDBValue, bool)>` - (값, updated 여부)
     pub async fn get(&self, key: Vec<u8>) -> anyhow::Result<Option<Vec<u8>>> {
-        let _guard = self.locks.lock(key.clone()).await;
+        let _guard = self.ctx.locks.lock(key.clone()).await;
         // AccessDB에서 조회
-        let serialized = match self.access_db.get(key.clone()).await? {
+        let serialized = match self.ctx.access_db.get(key.clone()).await? {
             Some(data) => data,
             None => return Ok(None),
         };
@@ -608,20 +613,20 @@ impl LocalDBTTL {
 
         let now = Utc::now();
         if now > db_value.expire_at() {
-            self.ttl_index.remove(db_value.expire_at(), &key).await?;
-            self.access_db.delete(key).await?;
+            self.ctx.ttl_index.remove(db_value.expire_at(), &key).await?;
+            self.ctx.access_db.delete(key).await?;
             return Ok(None);
         }
 
         // idle 상태이고 아직 만료되지 않았으면 updated_at 업데이트
         match &db_value.expired_at {
             ExpiredAt::Idle(_) => {
-                self.ttl_index.remove(db_value.expire_at(), &key).await?;
+                self.ctx.ttl_index.remove(db_value.expire_at(), &key).await?;
 
                 db_value.updated_at = now;
                 let serialized = postcard::to_stdvec(&db_value)?;
-                self.ttl_index.insert(db_value.expire_at(), &key).await?;
-                self.access_db.put(key, serialized).await?;
+                self.ctx.ttl_index.insert(db_value.expire_at(), &key).await?;
+                self.ctx.access_db.put(key, serialized).await?;
                 Ok(Some(db_value.value))
             }
             ExpiredAt::Live(_) => Ok(Some(db_value.value)),
@@ -633,13 +638,13 @@ impl LocalDBTTL {
     /// # Arguments
     /// * `key` - 키 (Vec<u8>)
     pub async fn delete(&self, key: Vec<u8>) -> anyhow::Result<()> {
-        let _guard = self.locks.lock(key.clone()).await;
+        let _guard = self.ctx.locks.lock(key.clone()).await;
         // AccessDB에서 조회하여 expired_at 확인
-        if let Some(serialized) = self.access_db.get(key.clone()).await? {
+        if let Some(serialized) = self.ctx.access_db.get(key.clone()).await? {
             let db_value: AccessDBValue = postcard::from_bytes(&serialized)?;
             // TTL 인덱스에서 제거
-            self.ttl_index.remove(db_value.expire_at(), &key).await?;
-            self.access_db.delete(key).await?;
+            self.ctx.ttl_index.remove(db_value.expire_at(), &key).await?;
+            self.ctx.access_db.delete(key).await?;
         }
 
         Ok(())
