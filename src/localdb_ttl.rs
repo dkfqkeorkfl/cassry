@@ -2,7 +2,7 @@ use chrono::{DateTime, Utc};
 use keyed_lock::r#async::KeyedLock;
 use rocksdb::{
     BlockBasedOptions, Cache, DBCompressionType, DBWithThreadMode, IteratorMode, MultiThreaded,
-    Options, ReadOptions, WriteBatch, WriteOptions,
+    Options, ReadOptions, WriteBatch as RocksWriteBatch, WriteOptions,
 };
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
@@ -198,7 +198,7 @@ impl TTLIndexInner {
 
     fn commit(&self, batch: WriteBatch) -> anyhow::Result<()> {
         self.db
-            .write_opt(batch, &self.write_opts)
+            .write_opt(batch.into(), &self.write_opts)
             .map_err(anyhow::Error::from)
     }
 
@@ -247,14 +247,16 @@ impl TTLIndexInner {
     /// * `usize` - 삭제된 항목의 개수
     fn delete_expired(&self, expired: HashMap<Vec<u8>, Vec<u8>>) -> anyhow::Result<()> {
         // 삭제할 항목들을 WriteBatch로 일괄 삭제
-        let mut batch = WriteBatch::default();
+        let mut batch = RocksWriteBatch::default();
 
         for db_key in expired.keys() {
             batch.delete(db_key);
         }
 
         if expired.len() > 0 {
-            self.commit(batch)?;
+            self.db
+                .write_opt(batch, &self.write_opts)
+                .map_err(anyhow::Error::from)?;
         }
 
         Ok(())
@@ -273,6 +275,43 @@ impl TTLIndexInner {
     /// 데이터베이스를 컴팩트합니다.
     fn compact_range(&self) {
         self.db.compact_range(None::<&[u8]>, None::<&[u8]>);
+    }
+}
+
+/// TTL 인덱스용 WriteBatch 래퍼
+///
+/// RocksDB의 WriteBatch를 래핑하여 TTL 인덱스 작업을 편리하게 수행할 수 있게 합니다.
+#[derive(Default)]
+struct WriteBatch {
+    batch: RocksWriteBatch,
+}
+
+impl WriteBatch {
+    /// TTL 인덱스에 항목을 추가합니다.
+    ///
+    /// # Arguments
+    /// * `expire_at` - 만료 시간 (DateTime<Utc>)
+    /// * `key` - AccessDB의 키 (&[u8])
+    fn insert(&mut self, expire_at: &DateTime<Utc>, key: &[u8]) {
+        let db_key = TTLIndexInner::timestamp_and_key_to_db_key(expire_at, key);
+        // value는 빈 값으로 저장 (키 구별을 위한 용도)
+        self.batch.put(&db_key, &[]);
+    }
+
+    /// TTL 인덱스에서 항목을 제거합니다.
+    ///
+    /// # Arguments
+    /// * `expire_at` - 만료 시간 (DateTime<Utc>)
+    /// * `key` - AccessDB의 키 (&[u8])
+    fn remove(&mut self, expire_at: &DateTime<Utc>, key: &[u8]) {
+        let db_key = TTLIndexInner::timestamp_and_key_to_db_key(expire_at, key);
+        self.batch.delete(&db_key);
+    }
+}
+
+impl Into<RocksWriteBatch> for WriteBatch {
+    fn into(self) -> RocksWriteBatch {
+        self.batch
     }
 }
 
@@ -615,21 +654,18 @@ impl LocalDBTTL {
         let mut batch = WriteBatch::default();
         let _guard = self.ctx.locks.lock(key.clone()).await;
 
-        if let Some(serialized) = self.ctx.access_db.get(key.clone()).await? {
-            let old_item: DBSchema = postcard::from_bytes(&serialized)?;
+        if let Some(bytes) = self.ctx.access_db.get(key.clone()).await? {
+            let old_item: DBSchema = postcard::from_bytes(&bytes)?;
             if old_item.expire_at() != new_item.expire_at() {
-                batch.delete(TTLIndexInner::timestamp_and_key_to_db_key(
-                    &old_item.expire_at(),
-                    &key,
-                ));
-                batch.put(
-                    TTLIndexInner::timestamp_and_key_to_db_key(&new_item.expire_at(), &key),
-                    &[],
-                );
+                batch.remove(&old_item.expire_at(), &key);
+                batch.insert(&new_item.expire_at(), &key);
                 self.ctx.ttl_index.commit(batch).await?;
             }
         } else {
-            self.ctx.ttl_index.insert(new_item.expire_at(), &key).await?;
+            self.ctx
+                .ttl_index
+                .insert(new_item.expire_at(), &key)
+                .await?;
         }
 
         // AccessDB에 저장
@@ -650,14 +686,10 @@ impl LocalDBTTL {
     pub async fn get(&self, key: &Vec<u8>) -> anyhow::Result<Option<Vec<u8>>> {
         let _guard = self.ctx.locks.lock(key.clone()).await;
         // AccessDB에서 조회
-        let serialized = match self.ctx.access_db.get(key.clone()).await? {
-            Some(data) => data,
+        let mut db_value = match self.ctx.access_db.get(key.clone()).await? {
+            Some(data) => postcard::from_bytes::<DBSchema>(&data)?,
             None => return Ok(None),
         };
-
-        // postcard로 역직렬화
-        // 추후에는 버전 별 분기 처리 필요
-        let mut db_value: DBSchema = postcard::from_bytes(&serialized)?;
 
         let now = Utc::now();
         if now > db_value.expire_at() {
@@ -673,18 +705,14 @@ impl LocalDBTTL {
                 let previous_expire_at = db_value.expire_at();
 
                 db_value.updated_at = now;
-                let serialized = postcard::to_stdvec(&db_value)?;
-                self.ctx.access_db.put(key.clone(), serialized).await?;
+                self.ctx
+                    .access_db
+                    .put(key.clone(), postcard::to_stdvec(&db_value)?)
+                    .await?;
                 if previous_expire_at != db_value.expire_at() {
                     let mut batch = WriteBatch::default();
-                    batch.delete(TTLIndexInner::timestamp_and_key_to_db_key(
-                        &previous_expire_at,
-                        key,
-                    ));
-                    batch.put(
-                        TTLIndexInner::timestamp_and_key_to_db_key(&db_value.expire_at(), key),
-                        &[],
-                    );
+                    batch.remove(&previous_expire_at, &key);
+                    batch.insert(&db_value.expire_at(), &key);
                     self.ctx.ttl_index.commit(batch).await?;
                 }
 
