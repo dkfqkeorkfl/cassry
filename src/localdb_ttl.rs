@@ -6,6 +6,7 @@ use rocksdb::{
 };
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
+use std::usize;
 use std::{path::Path, sync::Arc};
 use tokio::task::{self, JoinHandle};
 
@@ -79,12 +80,12 @@ impl TTLIndexInner {
         // Direct I/O OFF (range scan 위주이므로 일반 I/O가 더 나음)
         options.set_use_direct_reads(false);
         options.set_use_direct_io_for_flush_and_compaction(false);
-        // Compaction readahead OFF (delete-heavy 워크로드)
-        options.set_compaction_readahead_size(0);
+        // Compaction readahead 설정 (delete-heavy 워크로드에서도 일부 readahead가 성능 향상)
+        options.set_compaction_readahead_size(2 * 1024 * 1024); // 2MB
 
         // 파일 관리 설정
-        options.set_max_open_files(-1); // 제한 없음
-        options.set_keep_log_file_num(10); // WAL 로그 파일 개수 제한
+        options.set_max_open_files(10000); // 파일 핸들 개수 제한 (메모리 절약)
+        options.set_keep_log_file_num(100); // WAL 로그 파일 개수 제한 (복구 시간 단축)
         options.set_max_manifest_file_size(128 * 1024 * 1024); // 128MB
 
         // 데이터 안정성 설정
@@ -231,7 +232,12 @@ impl TTLIndexInner {
     ///
     /// # Returns
     /// * `Ok(HashMap)` - 만료된 항목들의 맵 (RocksDB key → AccessDB key)
-    fn scan_expired(&self, now: DateTime<Utc>) -> anyhow::Result<HashMap<Vec<u8>, Vec<u8>>> {
+    fn scan_expired(
+        &self,
+        now: DateTime<Utc>,
+        limit: Option<usize>,
+    ) -> anyhow::Result<HashMap<Vec<u8>, Vec<u8>>> {
+        let limit = limit.unwrap_or(usize::MAX);
         let now = now.timestamp_millis();
 
         let mut results = HashMap::new();
@@ -250,6 +256,10 @@ impl TTLIndexInner {
                 results.insert(db_key.into_vec(), key);
             } else {
                 // timestamp가 정렬되어 있으므로 이후 항목은 모두 만료되지 않음
+                break;
+            }
+
+            if results.len() >= limit {
                 break;
             }
         }
@@ -406,9 +416,13 @@ impl TTLIndex {
     ///
     /// # Returns
     /// * `Ok(HashMap)` - 만료된 항목들의 맵 (RocksDB key → AccessDB key)
-    async fn scan_expired(&self, now: DateTime<Utc>) -> anyhow::Result<HashMap<Vec<u8>, Vec<u8>>> {
+    async fn scan_expired(
+        &self,
+        now: DateTime<Utc>,
+        limit: Option<usize>,
+    ) -> anyhow::Result<HashMap<Vec<u8>, Vec<u8>>> {
         let inner = self.inner.clone();
-        task::spawn_blocking(move || inner.scan_expired(now)).await?
+        task::spawn_blocking(move || inner.scan_expired(now, limit)).await?
     }
 }
 
@@ -550,7 +564,11 @@ impl LocalDBTTL {
     /// - `path/index`: TTL 인덱스용 (만료 시간 관리)
     ///
     /// 백그라운드 태스크가 주기적으로 만료된 항목을 스캔하고 삭제합니다.
-    pub async fn new(path: String, interval: std::time::Duration) -> anyhow::Result<Self> {
+    pub async fn new(
+        path: String,
+        interval: std::time::Duration,
+        limit_scan: Option<usize>,
+    ) -> anyhow::Result<Self> {
         let index_path = format!("{}/index", path);
 
         let access_db = LocalDB::new(path.clone()).await?;
@@ -562,13 +580,17 @@ impl LocalDBTTL {
             locks: KeyedLock::new(),
         });
 
-        let ctx = (Arc::downgrade(&context), interval);
+        let ctx = (Arc::downgrade(&context), interval, limit_scan);
         let task = task::spawn(async move {
-            let (context, interval) = ctx;
-            while let Some(context) = context.upgrade() {
+            let (context, interval, limit_scan) = ctx;
+            loop {
                 let start = std::time::Instant::now();
-                if let Err(e) = Self::delete_expired(context).await {
-                    crate::_private_logger::error(format!("Error in delete_expired: {}", e));
+                if let Some(context) = context.upgrade() {
+                    if let Err(e) = Self::delete_expired(context, limit_scan).await {
+                        crate::_private_logger::error(format!("Error in delete_expired: {}", e));
+                    }
+                } else {
+                    break;
                 }
 
                 let remaining = interval.saturating_sub(start.elapsed());
@@ -591,8 +613,8 @@ impl LocalDBTTL {
     ///
     /// # Arguments
     /// * `ctx` - LocalDBTTL 컨텍스트
-    async fn delete_expired(ctx: Arc<Context>) -> anyhow::Result<()> {
-        let expired = ctx.ttl_index.scan_expired(Utc::now()).await?;
+    async fn delete_expired(ctx: Arc<Context>, limit_scan: Option<usize>) -> anyhow::Result<()> {
+        let expired = ctx.ttl_index.scan_expired(Utc::now(), limit_scan).await?;
         for (index, key) in expired {
             let _guard = ctx.locks.lock(key.clone()).await;
             if ctx.ttl_index.includes(&index).await? {
