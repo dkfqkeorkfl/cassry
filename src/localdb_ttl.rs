@@ -171,6 +171,25 @@ impl TTLIndexInner {
             .map_err(anyhow::Error::from)
     }
 
+    /// TTL 인덱스에서 항목을 제거합니다.
+    ///
+    /// 지정된 만료 시간과 키에 해당하는 인덱스 항목을 삭제합니다.
+    /// AccessDB의 데이터는 삭제하지 않으며, 인덱스 항목만 제거합니다.
+    ///
+    /// # Arguments
+    /// * `expire_at` - 만료 시간 (삭제할 항목의 만료 시간)
+    /// * `key` - AccessDB의 키
+    fn remove(&self, expire_at: DateTime<Utc>, key: &[u8]) -> anyhow::Result<()> {
+        let db_key = Self::timestamp_and_key_to_db_key(&expire_at, key);
+        self.remove_by_key(&db_key)
+    }
+
+    fn remove_by_key(&self, combined_key: &[u8]) -> anyhow::Result<()> {
+        self.db
+            .delete_opt(combined_key, &self.write_opts)
+            .map_err(anyhow::Error::from)
+    }
+
     /// TTL 인덱스에서 항목이 존재하는지 확인합니다.
     ///
     /// # Arguments
@@ -184,21 +203,6 @@ impl TTLIndexInner {
             Some(_) => Ok(true),
             None => Ok(false),
         }
-    }
-
-    /// TTL 인덱스에서 항목을 제거합니다.
-    ///
-    /// 지정된 만료 시간과 키에 해당하는 인덱스 항목을 삭제합니다.
-    /// AccessDB의 데이터는 삭제하지 않으며, 인덱스 항목만 제거합니다.
-    ///
-    /// # Arguments
-    /// * `expire_at` - 만료 시간 (삭제할 항목의 만료 시간)
-    /// * `key` - AccessDB의 키
-    fn remove(&self, expire_at: DateTime<Utc>, key: &[u8]) -> anyhow::Result<()> {
-        let db_key = Self::timestamp_and_key_to_db_key(&expire_at, key);
-        self.db
-            .delete_opt(&db_key, &self.write_opts)
-            .map_err(anyhow::Error::from)
     }
 
     /// WriteBatch를 커밋합니다.
@@ -251,32 +255,6 @@ impl TTLIndexInner {
         }
 
         Ok(results)
-    }
-
-    /// 만료된 항목들을 TTL 인덱스에서 삭제합니다.
-    ///
-    /// 지정된 맵에 포함된 모든 항목을 인덱스에서 제거합니다.
-    ///
-    /// # Arguments
-    /// * `expired` - 삭제할 항목들의 맵 (RocksDB key → AccessDB key)
-    ///
-    /// # Returns
-    /// 삭제 성공 시 `Ok(())`, 실패 시 에러 반환
-    fn delete_expired(&self, expired: HashMap<Vec<u8>, Vec<u8>>) -> anyhow::Result<()> {
-        // 삭제할 항목들을 WriteBatch로 일괄 삭제
-        let mut batch = RocksWriteBatch::default();
-
-        for db_key in expired.keys() {
-            batch.delete(db_key);
-        }
-
-        if expired.len() > 0 {
-            self.db
-                .write_opt(batch, &self.write_opts)
-                .map_err(anyhow::Error::from)?;
-        }
-
-        Ok(())
     }
 }
 
@@ -412,6 +390,11 @@ impl TTLIndex {
         task::spawn_blocking(move || inner.remove(expire_at, &key)).await?
     }
 
+    async fn remove_by_key(&self, key: Vec<u8>) -> anyhow::Result<()> {
+        let inner = self.inner.clone();
+        task::spawn_blocking(move || inner.remove_by_key(&key)).await?
+    }
+
     /// 만료된 항목들을 스캔합니다.
     ///
     /// RocksDB의 정렬 기능을 이용하여 앞에서부터 순차적으로 만료된 항목들을 스캔합니다.
@@ -423,24 +406,9 @@ impl TTLIndex {
     ///
     /// # Returns
     /// * `Ok(HashMap)` - 만료된 항목들의 맵 (RocksDB key → AccessDB key)
-    async fn scan_expired(
-        &self,
-        now: DateTime<Utc>,
-    ) -> anyhow::Result<HashMap<Vec<u8>, Vec<u8>>> {
+    async fn scan_expired(&self, now: DateTime<Utc>) -> anyhow::Result<HashMap<Vec<u8>, Vec<u8>>> {
         let inner = self.inner.clone();
         task::spawn_blocking(move || inner.scan_expired(now)).await?
-    }
-
-    /// 만료된 항목들을 TTL 인덱스에서 삭제합니다.
-    ///
-    /// 지정된 맵에 포함된 모든 항목을 인덱스에서 제거합니다.
-    /// 내부적으로 블로킹 태스크로 실행됩니다.
-    ///
-    /// # Arguments
-    /// * `expired` - 삭제할 항목들의 맵 (RocksDB key → AccessDB key)
-    async fn delete_expired(&self, expired: HashMap<Vec<u8>, Vec<u8>>) -> anyhow::Result<()> {
-        let inner = self.inner.clone();
-        task::spawn_blocking(move || inner.delete_expired(expired)).await?
     }
 }
 
@@ -624,25 +592,14 @@ impl LocalDBTTL {
     /// # Arguments
     /// * `ctx` - LocalDBTTL 컨텍스트
     async fn delete_expired(ctx: Arc<Context>) -> anyhow::Result<()> {
-        let now = Utc::now();
-
-        let mut expired = ctx.ttl_index.scan_expired(now).await?;
-        let mut deleted_keys = Vec::new();
-        for (index, key) in expired.iter() {
+        let expired = ctx.ttl_index.scan_expired(Utc::now()).await?;
+        for (index, key) in expired {
             let _guard = ctx.locks.lock(key.clone()).await;
             if ctx.ttl_index.includes(&index).await? {
-                ctx.access_db.delete(key.clone()).await?;
-            } else {
-                // 이미 삭제된 항목 (다른 프로세스에서 삭제됨)
-                deleted_keys.push(index.clone());
+                ctx.access_db.delete(key).await?;
+                ctx.ttl_index.remove_by_key(index).await?;
             }
         }
-        // 이미 삭제된 항목들을 제거
-        for db_key in deleted_keys {
-            expired.remove(&db_key);
-        }
-        // TTL 인덱스에서 만료된 항목 삭제
-        ctx.ttl_index.delete_expired(expired).await?;
         Ok(())
     }
 
@@ -665,11 +622,10 @@ impl LocalDBTTL {
         expired_at: ExpiredAt,
     ) -> anyhow::Result<()> {
         // AccessDBValue 생성
-        let now = Utc::now();
         let new_item = DBSchema {
             ver: Self::VERSION,
             expired_at: expired_at.clone(),
-            updated_at: now,
+            updated_at: Utc::now(),
             value,
         };
         let serialized = postcard::to_stdvec(&new_item)?;
