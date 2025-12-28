@@ -6,7 +6,6 @@ pub use reqwest;
 pub use chrono;
 pub use anyhow;
 pub use futures;
-pub use redis;
 
 pub use once_cell;
 pub use hex;
@@ -34,7 +33,7 @@ pub mod util;
 pub mod float;
 pub mod timelimiter;
 pub mod secret_loader;
-pub mod radis_wrap;
+
 pub mod twdb;
 pub mod goosheet;
 pub mod serialization;
