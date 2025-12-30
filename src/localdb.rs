@@ -417,10 +417,6 @@ impl LocalDBInner {
     fn get_property(&self, name: &str) -> anyhow::Result<Option<String>> {
         self.db.property_value(name).map_err(anyhow::Error::from)
     }
-
-    fn get_path(&self) -> &Path {
-        self.db.path()
-    }
 }
 
 #[derive(Clone)]

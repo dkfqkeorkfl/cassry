@@ -27,7 +27,6 @@ pub mod cache;
 pub mod cache_customed;
 pub mod json;
 pub mod localdb;
-pub mod localdb_log;
 pub mod localdb_ttl;
 pub mod slack;
 pub mod types;

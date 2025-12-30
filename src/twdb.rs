@@ -4,6 +4,8 @@ use std::fs;
 use std::path::Path;
 use tokio::sync::RwLock;
 
+use crate::anyhowln;
+
 use super::localdb::*;
 
 /// TTL을 기반으로 적절한 폴더명을 생성합니다.
@@ -17,37 +19,56 @@ use super::localdb::*;
 /// # Returns
 /// * `Ok(String)` - 생성된 폴더 경로
 /// * `Err(anyhow::Error)` - TTL이 86400초의 약수가 아닌 경우
-pub fn get_folder_name(
-    base_path: &str,
-    ttl: &Duration,
-    timestamp: &DateTime<Utc>,
-) -> anyhow::Result<String> {
-    const SECONDS_IN_DAY: i64 = 24 * 60 * 60; // 86400 seconds
-    let ttl_seconds = ttl.num_seconds();
 
-    // 86400초의 약수인지 확인
-    if SECONDS_IN_DAY % ttl_seconds != 0 {
-        return Err(anyhow::anyhow!(
-            "TTL must be a divisor of 86400 seconds (24 hours). Examples: 1s, 1m, 1h, 2h, 3h, 4h, 6h, 8h, 12h, 24h"
-        ));
+#[derive(Clone)]
+pub enum TimeWindowType {
+    General,
+    Log,
+}
+
+#[derive(Clone)]
+pub struct TimeWindowDBConfig {
+    pub base_path: String,
+    pub ttl: Duration,
+    pub delete_legacy: bool,
+    pub ty: TimeWindowType,
+}
+
+impl TimeWindowDBConfig {
+    fn get_folder_name(&self, timestamp: &DateTime<Utc>) -> anyhow::Result<String> {
+        const SECONDS_IN_DAY: i64 = 24 * 60 * 60; // 86400 seconds
+        let ttl_seconds = self.ttl.num_seconds();
+
+        // 86400초의 약수인지 확인
+        if ttl_seconds == 0 || SECONDS_IN_DAY % ttl_seconds != 0 {
+            return Err(anyhowln!(
+                "TTL must be a divisor of 86400 seconds (24 hours). Examples: 1s, 1m, 1h, 2h, 3h, 4h, 6h, 8h, 12h, 24h"
+            ));
+        }
+
+        let seconds = timestamp.timestamp();
+        let folder_timestamp = (seconds / ttl_seconds) * ttl_seconds;
+        let folder_time = Utc.timestamp_opt(folder_timestamp, 0).unwrap();
+
+        Ok(format!(
+            "{}/{}",
+            self.base_path,
+            folder_time.format("%Y-%m-%d_%H-%M-%S")
+        ))
     }
 
-    let seconds = timestamp.timestamp();
-    let folder_timestamp = (seconds / ttl_seconds) * ttl_seconds;
-    let folder_time = Utc.timestamp_opt(folder_timestamp, 0).unwrap();
-
-    Ok(format!(
-        "{}/{}",
-        base_path,
-        folder_time.format("%Y-%m-%d_%H-%M-%S")
-    ))
+    async fn get_localdb(&self, timestamp: &DateTime<Utc>) -> anyhow::Result<LocalDB> {
+        let path = self.get_folder_name(timestamp)?;
+        match self.ty {
+            TimeWindowType::General => LocalDB::new(config::General::new(path)).await,
+            TimeWindowType::Log => LocalDB::new(config::Log::new(path)).await,
+        }
+    }
 }
 
 /// TimeWindowDB의 내부 구현
 struct TimeWindowDBInner {
-    path: String,
-    ttl: Duration,
-    delete_legacy: bool,
+    config: TimeWindowDBConfig,
 
     current_db: LocalDB,
     created_at: chrono::DateTime<Utc>,
@@ -55,28 +76,26 @@ struct TimeWindowDBInner {
 }
 
 impl TimeWindowDBInner {
-    async fn new(base_path: String, ttl: Duration, delete_legacy: bool) -> anyhow::Result<Self> {
+    async fn new(config: TimeWindowDBConfig) -> anyhow::Result<Self> {
         let current_time = Utc::now();
 
         // Create base directory if it doesn't exist
-        let base_path_obj = Path::new(&base_path);
+        let base_path_obj = Path::new(&config.base_path);
         if !base_path_obj.exists() {
             fs::create_dir_all(base_path_obj)?;
         }
 
-        let db_path = get_folder_name(&base_path, &ttl, &current_time)?;
+        let current_db = config.get_localdb(&current_time).await?;
         Ok(Self {
-            path: base_path.to_string(),
-            ttl,
-            delete_legacy,
-            current_db: LocalDB::new(config::General::new(db_path)).await?,
-            updated_at: current_time,
+            config,
+            current_db,
             created_at: current_time,
+            updated_at: current_time,
         })
     }
 
     fn should_rotate(&self) -> bool {
-        (Utc::now() - self.updated_at) >= self.ttl
+        (Utc::now() - self.updated_at) >= self.config.ttl
     }
 
     async fn rotate_db(&mut self) -> anyhow::Result<()> {
@@ -85,14 +104,13 @@ impl TimeWindowDBInner {
         }
 
         let current_time = Utc::now();
-        let new_db_path = get_folder_name(&self.path, &self.ttl, &current_time)?;
-        let new_db = LocalDB::new(config::General::new(new_db_path)).await?;
+        let new_db = self.config.get_localdb(&current_time).await?;
         self.updated_at = current_time;
 
         let current_db_path = self.current_db.get_path().display().to_string();
         self.current_db = new_db;
         // Handle old DB
-        if self.delete_legacy {
+        if self.config.delete_legacy {
             if let Err(e) =
                 tokio::task::spawn_blocking(move || std::fs::remove_dir_all(current_db_path)).await
             {
@@ -157,24 +175,9 @@ pub struct TimeWindowDB {
     inner: RwLock<TimeWindowDBInner>,
 }
 
-#[derive(Clone)]
-pub struct TimeWindowDBConfig {
-    pub base_path: String,
-    pub ttl: Duration,
-    pub delete_legacy: bool,
-}
-
 impl TimeWindowDB {
-    pub async fn from_config(config: TimeWindowDBConfig) -> anyhow::Result<Self> {
-        Self::new(config.base_path, config.ttl, config.delete_legacy).await
-    }
-
-    pub async fn new(
-        base_path: String,
-        ttl: Duration,
-        delete_legacy: bool,
-    ) -> anyhow::Result<Self> {
-        let inner = TimeWindowDBInner::new(base_path, ttl, delete_legacy).await?;
+    pub async fn new(config: TimeWindowDBConfig) -> anyhow::Result<Self> {
+        let inner = TimeWindowDBInner::new(config).await?;
         Ok(Self {
             inner: inner.into(),
         })
