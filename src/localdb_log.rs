@@ -1,6 +1,6 @@
 use rocksdb::{
-    BlockBasedOptions, Cache, DBCompressionType, DBWithThreadMode, IteratorMode, MultiThreaded,
-    Options, ReadOptions, WriteBatch, WriteOptions,
+    BlockBasedOptions, Cache, DBCompressionType, DBWithThreadMode, MultiThreaded,
+    Options, ReadOptions, WriteOptions,
 };
 use serde::{Deserialize, Serialize};
 use std::{path::Path, sync::Arc};
@@ -66,7 +66,7 @@ impl LocalDBLogInner {
         options.set_compression_per_level(&[
             DBCompressionType::None,           // L0: 압축 없음 (최신 데이터, 빠른 쓰기)
             DBCompressionType::None,            // L1: 빠른 압축
-            DBCompressionType::Lz4,            // L2: 빠른 압축
+            DBCompressionType::None,            // L2: 빠른 압축
             DBCompressionType::Lz4,            // L3: 빠른 압축
             DBCompressionType::Lz4,            // L4: 빠른 압축
             DBCompressionType::Lz4,            // L5: 빠른 압축
@@ -119,373 +119,88 @@ pub struct LocalDBLog {
     inner: Arc<LocalDBLogInner>,
 }
 
+impl LocalDBLogInner {
+    fn put(&self, key: &[u8], value: &[u8]) -> anyhow::Result<()> {
+        self.db
+            .put_opt(key, value, &self.write_opts)
+            .map_err(anyhow::Error::from)
+    }
+
+    fn get(&self, key: &[u8]) -> anyhow::Result<Option<Vec<u8>>> {
+        Ok(self.db.get_opt(key, &self.read_opts)?)
+    }
+
+    fn delete(&self, key: &[u8]) -> anyhow::Result<()> {
+        self.db
+            .delete_opt(key, &self.write_opts)
+            .map_err(anyhow::Error::from)
+    }
+}
+
 impl LocalDBLog {
     /// 새로운 로그용 데이터베이스를 생성합니다.
-    pub fn new(path: String) -> anyhow::Result<Self> {
-        let inner = LocalDBLogInner::new(path)?;
-        Ok(Self {
+    pub async fn new(path: String) -> anyhow::Result<Self> {
+        let inner = task::spawn_blocking(move || LocalDBLogInner::new(path)).await??;
+
+        Ok(LocalDBLog {
             inner: Arc::new(inner),
         })
     }
 
-    /// uid/timestamp 형식의 키로 로그를 저장합니다.
-    ///
-    /// # Arguments
-    /// * `uid` - 사용자 ID
-    /// * `timestamp` - 타임스탬프 (밀리초)
-    /// * `value` - 저장할 값 (JSON 문자열)
-    pub async fn put_by_uid_timestamp(
-        &self,
-        uid: &str,
-        timestamp: u64,
-        value: &str,
-    ) -> anyhow::Result<()> {
-        let key = format!("{}/{}", uid, timestamp);
+    /// 키-값 쌍을 저장합니다.
+    pub async fn put(&self, key: Vec<u8>, value: Vec<u8>) -> anyhow::Result<()> {
         let inner = self.inner.clone();
-        let key_bytes = key.into_bytes();
-        let value_bytes = value.as_bytes().to_vec();
-
-        task::spawn_blocking(move || {
-            inner
-                .db
-                .put_opt(key_bytes, value_bytes, &inner.write_opts)
-                .map_err(anyhow::Error::from)
-        })
-        .await?
+        task::spawn_blocking(move || inner.put(&key, &value)).await?
     }
 
-    /// timestamp/uid 형식의 키로 로그를 저장합니다.
-    ///
-    /// # Arguments
-    /// * `timestamp` - 타임스탬프 (밀리초)
-    /// * `uid` - 사용자 ID
-    /// * `value` - 저장할 값 (JSON 문자열)
-    pub async fn put_by_timestamp_uid(
-        &self,
-        timestamp: u64,
-        uid: &str,
-        value: &str,
-    ) -> anyhow::Result<()> {
-        let key = format!("{}/{}", timestamp, uid);
+    /// 키로 값을 조회합니다.
+    pub async fn get(&self, key: Vec<u8>) -> anyhow::Result<Option<Vec<u8>>> {
         let inner = self.inner.clone();
-        let key_bytes = key.into_bytes();
-        let value_bytes = value.as_bytes().to_vec();
-
-        task::spawn_blocking(move || {
-            inner
-                .db
-                .put_opt(key_bytes, value_bytes, &inner.write_opts)
-                .map_err(anyhow::Error::from)
-        })
-        .await?
+        task::spawn_blocking(move || inner.get(&key)).await?
     }
 
-    /// uid/timestamp와 timestamp/uid 두 형식 모두로 로그를 저장합니다.
-    ///
-    /// # Arguments
-    /// * `uid` - 사용자 ID
-    /// * `timestamp` - 타임스탬프 (밀리초)
-    /// * `value` - 저장할 값 (JSON 문자열)
-    pub async fn put_both(
-        &self,
-        uid: &str,
-        timestamp: u64,
-        value: &str,
-    ) -> anyhow::Result<()> {
+    /// 키를 삭제합니다.
+    pub async fn delete(&self, key: Vec<u8>) -> anyhow::Result<()> {
         let inner = self.inner.clone();
-        let uid_key = format!("{}/{}", uid, timestamp);
-        let timestamp_key = format!("{}/{}", timestamp, uid);
-        let value_bytes = value.as_bytes().to_vec();
-
-        task::spawn_blocking(move || {
-            let mut batch = WriteBatch::default();
-            batch.put(uid_key.as_bytes(), &value_bytes);
-            batch.put(timestamp_key.as_bytes(), &value_bytes);
-            inner
-                .db
-                .write_opt(batch, &inner.write_opts)
-                .map_err(anyhow::Error::from)
-        })
-        .await?
+        task::spawn_blocking(move || inner.delete(&key)).await?
     }
 
-    /// JSON 객체를 uid/timestamp와 timestamp/uid 두 형식 모두로 저장합니다.
-    pub async fn put_json_both<T>(
-        &self,
-        uid: &str,
-        timestamp: u64,
-        value: &T,
-    ) -> anyhow::Result<()>
+    /// JSON 객체를 조회합니다.
+    pub async fn get_json<T>(&self, key: String) -> anyhow::Result<Option<T>>
+    where
+        T: for<'de> Deserialize<'de>,
+    {
+        let inner = self.inner.clone();
+        if let Some(result) = task::spawn_blocking(move || inner.get(key.as_bytes()))
+            .await??
+            .map(|v| String::from_utf8(v))
+        {
+            let value: T = serde_json::from_str(&result?)?;
+            Ok(Some(value))
+        } else {
+            Ok(None)
+        }
+    }
+
+    /// JSON 객체를 저장합니다.
+    pub async fn put_json<T>(&self, key: String, value: &T) -> anyhow::Result<()>
     where
         T: Serialize,
     {
         let json_str = serde_json::to_string(value)?;
-        self.put_both(uid, timestamp, &json_str).await
+        let inner = self.inner.clone();
+        task::spawn_blocking(move || inner.put(key.as_bytes(), json_str.as_bytes())).await?
     }
 
-    /// uid로 시작하는 모든 로그를 조회합니다 (정렬된 순서).
-    ///
-    /// # Arguments
-    /// * `uid` - 사용자 ID
-    /// * `limit` - 최대 반환 개수 (None이면 제한 없음)
-    pub async fn get_by_uid(
-        &self,
-        uid: &str,
-        limit: Option<usize>,
-    ) -> anyhow::Result<Vec<(String, String)>> {
-        let prefix = format!("{}/", uid);
+    /// JSON 객체를 삭제합니다.
+    pub async fn delete_json(&self, key: String) -> anyhow::Result<()> {
         let inner = self.inner.clone();
-        let read_opts = inner.read_opts.clone();
-
-        task::spawn_blocking(move || {
-            let mut results = Vec::new();
-            let iter = inner.db.iterator(IteratorMode::From(
-                prefix.as_bytes(),
-                rocksdb::Direction::Forward,
-            ));
-
-            for item in iter {
-                let (key, value) = item?;
-                let key_str = String::from_utf8(key.to_vec())?;
-
-                // prefix로 시작하지 않으면 중단 (정렬되어 있으므로)
-                if !key_str.starts_with(&prefix) {
-                    break;
-                }
-
-                let value_str = String::from_utf8(value.to_vec())?;
-                results.push((key_str, value_str));
-
-                if let Some(limit) = limit {
-                    if results.len() >= limit {
-                        break;
-                    }
-                }
-            }
-
-            Ok::<_, anyhow::Error>(results)
-        })
-        .await?
+        task::spawn_blocking(move || inner.delete(key.as_bytes())).await?
     }
 
-    /// timestamp로 시작하는 모든 로그를 조회합니다 (정렬된 순서).
-    ///
-    /// # Arguments
-    /// * `timestamp` - 시작 타임스탬프 (밀리초)
-    /// * `limit` - 최대 반환 개수 (None이면 제한 없음)
-    pub async fn get_by_timestamp(
-        &self,
-        timestamp: u64,
-        limit: Option<usize>,
-    ) -> anyhow::Result<Vec<(String, String)>> {
-        let prefix = format!("{}/", timestamp);
-        let inner = self.inner.clone();
-        let read_opts = inner.read_opts.clone();
-
-        task::spawn_blocking(move || {
-            let mut results = Vec::new();
-            let iter = inner.db.iterator(IteratorMode::From(
-                prefix.as_bytes(),
-                rocksdb::Direction::Forward,
-            ));
-
-            for item in iter {
-                let (key, value) = item?;
-                let key_str = String::from_utf8(key.to_vec())?;
-
-                // prefix로 시작하지 않으면 중단 (정렬되어 있으므로)
-                if !key_str.starts_with(&prefix) {
-                    break;
-                }
-
-                let value_str = String::from_utf8(value.to_vec())?;
-                results.push((key_str, value_str));
-
-                if let Some(limit) = limit {
-                    if results.len() >= limit {
-                        break;
-                    }
-                }
-            }
-
-            Ok::<_, anyhow::Error>(results)
-        })
-        .await?
-    }
-
-    /// uid와 timestamp 범위로 로그를 조회합니다.
-    ///
-    /// # Arguments
-    /// * `uid` - 사용자 ID
-    /// * `start_timestamp` - 시작 타임스탬프 (밀리초)
-    /// * `end_timestamp` - 종료 타임스탬프 (밀리초, None이면 제한 없음)
-    /// * `limit` - 최대 반환 개수 (None이면 제한 없음)
-    pub async fn get_by_uid_range(
-        &self,
-        uid: &str,
-        start_timestamp: u64,
-        end_timestamp: Option<u64>,
-        limit: Option<usize>,
-    ) -> anyhow::Result<Vec<(String, String)>> {
-        let start_key = format!("{}/{}", uid, start_timestamp);
-        let inner = self.inner.clone();
-        let read_opts = inner.read_opts.clone();
-
-        task::spawn_blocking(move || {
-            let mut results = Vec::new();
-            let iter = inner.db.iterator(IteratorMode::From(
-                start_key.as_bytes(),
-                rocksdb::Direction::Forward,
-            ));
-
-            let uid_prefix = format!("{}/", uid);
-
-            for item in iter {
-                let (key, value) = item?;
-                let key_str = String::from_utf8(key.to_vec())?;
-
-                // uid prefix로 시작하지 않으면 중단
-                if !key_str.starts_with(&uid_prefix) {
-                    break;
-                }
-
-                // timestamp 추출
-                if let Some(timestamp_str) = key_str.strip_prefix(&uid_prefix) {
-                    if let Ok(timestamp) = timestamp_str.parse::<u64>() {
-                        // end_timestamp 체크
-                        if let Some(end) = end_timestamp {
-                            if timestamp > end {
-                                break;
-                            }
-                        }
-                    }
-                }
-
-                let value_str = String::from_utf8(value.to_vec())?;
-                results.push((key_str, value_str));
-
-                if let Some(limit) = limit {
-                    if results.len() >= limit {
-                        break;
-                    }
-                }
-            }
-
-            Ok::<_, anyhow::Error>(results)
-        })
-        .await?
-    }
-
-    /// timestamp 범위로 로그를 조회합니다.
-    ///
-    /// # Arguments
-    /// * `start_timestamp` - 시작 타임스탬프 (밀리초)
-    /// * `end_timestamp` - 종료 타임스탬프 (밀리초, None이면 제한 없음)
-    /// * `limit` - 최대 반환 개수 (None이면 제한 없음)
-    pub async fn get_by_timestamp_range(
-        &self,
-        start_timestamp: u64,
-        end_timestamp: Option<u64>,
-        limit: Option<usize>,
-    ) -> anyhow::Result<Vec<(String, String)>> {
-        let start_key = format!("{}/", start_timestamp);
-        let inner = self.inner.clone();
-        let read_opts = inner.read_opts.clone();
-
-        task::spawn_blocking(move || {
-            let mut results = Vec::new();
-            let iter = inner.db.iterator(IteratorMode::From(
-                start_key.as_bytes(),
-                rocksdb::Direction::Forward,
-            ));
-
-            for item in iter {
-                let (key, value) = item?;
-                let key_str = String::from_utf8(key.to_vec())?;
-
-                // timestamp prefix 추출
-                if let Some(rest) = key_str.split('/').next() {
-                    if let Ok(timestamp) = rest.parse::<u64>() {
-                        // end_timestamp 체크
-                        if let Some(end) = end_timestamp {
-                            if timestamp > end {
-                                break;
-                            }
-                        }
-                    } else {
-                        // timestamp로 시작하지 않으면 중단
-                        break;
-                    }
-                } else {
-                    break;
-                }
-
-                let value_str = String::from_utf8(value.to_vec())?;
-                results.push((key_str, value_str));
-
-                if let Some(limit) = limit {
-                    if results.len() >= limit {
-                        break;
-                    }
-                }
-            }
-
-            Ok::<_, anyhow::Error>(results)
-        })
-        .await?
-    }
-
-    /// 특정 키로 로그를 조회합니다.
-    pub async fn get(&self, key: &str) -> anyhow::Result<Option<String>> {
-        let inner = self.inner.clone();
-        let key_bytes = key.as_bytes().to_vec();
-
-        task::spawn_blocking(move || {
-            inner
-                .db
-                .get_opt(key_bytes, &inner.read_opts)
-                .map_err(anyhow::Error::from)
-                .and_then(|bytes| {
-                    if let Some(bytes) = bytes {
-                        Ok(Some(String::from_utf8(bytes)?))
-                    } else {
-                        Ok(None)
-                    }
-                })
-        })
-        .await?
-    }
-
-    /// 특정 키의 로그를 삭제합니다.
-    pub async fn delete(&self, key: &str) -> anyhow::Result<()> {
-        let inner = self.inner.clone();
-        let key_bytes = key.as_bytes().to_vec();
-
-        task::spawn_blocking(move || {
-            inner
-                .db
-                .delete_opt(key_bytes, &inner.write_opts)
-                .map_err(anyhow::Error::from)
-        })
-        .await?
-    }
-
-    /// uid/timestamp와 timestamp/uid 두 형식 모두를 삭제합니다.
-    pub async fn delete_both(&self, uid: &str, timestamp: u64) -> anyhow::Result<()> {
-        let inner = self.inner.clone();
-        let uid_key = format!("{}/{}", uid, timestamp);
-        let timestamp_key = format!("{}/{}", timestamp, uid);
-
-        task::spawn_blocking(move || {
-            let mut batch = WriteBatch::default();
-            batch.delete(uid_key.as_bytes());
-            batch.delete(timestamp_key.as_bytes());
-            inner
-                .db
-                .write_opt(batch, &inner.write_opts)
-                .map_err(anyhow::Error::from)
-        })
-        .await?
+    /// 데이터베이스 경로를 반환합니다.
+    pub fn get_path(&self) -> &str {
+        &self.inner.path
     }
 }
 
