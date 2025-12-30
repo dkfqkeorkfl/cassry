@@ -4,7 +4,7 @@ use std::fs;
 use std::path::Path;
 use tokio::sync::RwLock;
 
-use super::localdb::LocalDB;
+use super::localdb::*;
 
 /// TTL을 기반으로 적절한 폴더명을 생성합니다.
 /// TTL은 반드시 86400초(24시간)의 약수여야 합니다.
@@ -69,7 +69,7 @@ impl TimeWindowDBInner {
             path: base_path.to_string(),
             ttl,
             delete_legacy,
-            current_db: LocalDB::new(db_path).await?,
+            current_db: LocalDB::new(config::General::new(db_path)).await?,
             updated_at: current_time,
             created_at: current_time,
         })
@@ -86,10 +86,10 @@ impl TimeWindowDBInner {
 
         let current_time = Utc::now();
         let new_db_path = get_folder_name(&self.path, &self.ttl, &current_time)?;
-        let new_db = LocalDB::new(new_db_path).await?;
+        let new_db = LocalDB::new(config::General::new(new_db_path)).await?;
         self.updated_at = current_time;
 
-        let current_db_path = self.current_db.get_path().to_string();
+        let current_db_path = self.current_db.get_path().display().to_string();
         self.current_db = new_db;
         // Handle old DB
         if self.delete_legacy {

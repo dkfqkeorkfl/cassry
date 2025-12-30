@@ -6,6 +6,153 @@ use serde::{Deserialize, Serialize};
 use std::{path::Path, sync::Arc};
 use tokio::task;
 
+pub mod config {
+    use super::*;
+
+    pub trait Generator {
+        fn generate(
+            &self,
+        ) -> anyhow::Result<(DBWithThreadMode<MultiThreaded>, WriteOptions, ReadOptions)>;
+    }
+
+    /// 일반 데이터베이스와 옵션을 생성하는 헬퍼 함수 (append-heavy + range scan 최적화)
+    pub struct General(String);
+    impl General {
+        pub fn new(path: String) -> Self {
+            Self(path)
+        }
+    }
+
+    /// 로그 데이터베이스와 옵션을 생성하는 헬퍼 함수 (append-heavy + range scan 최적화)
+    ///
+    /// # Returns
+    /// `(DBWithThreadMode<MultiThreaded>, WriteOptions, ReadOptions)`
+    pub struct Log(String);
+    impl Log {
+        pub fn new(path: String) -> Self {
+            Self(path)
+        }
+    }
+
+    impl Generator for General {
+        fn generate(
+            &self,
+        ) -> anyhow::Result<(DBWithThreadMode<MultiThreaded>, WriteOptions, ReadOptions)> {
+            let mut block_opts = BlockBasedOptions::default();
+            let cache = Cache::new_lru_cache(4 * 1024 * 1024 * 1024); // 4GB
+            block_opts.set_block_cache(&cache);
+            block_opts.set_bloom_filter(10.0, false);
+            block_opts.set_cache_index_and_filter_blocks(true);
+
+            let mut options = Options::default();
+            options.create_if_missing(true);
+            options.set_block_based_table_factory(&block_opts);
+            options.set_max_background_jobs(4);
+            options.set_bytes_per_sync(1024 * 1024);
+            options.set_write_buffer_size(64 * 1024 * 1024);
+            options.set_max_write_buffer_number(3);
+            options.set_min_write_buffer_number_to_merge(2);
+            options.set_max_bytes_for_level_base(256 * 1024 * 1024);
+            options.set_target_file_size_base(64 * 1024 * 1024);
+
+            options.set_compression_type(DBCompressionType::Lz4);
+            options.set_compression_per_level(&[
+                DBCompressionType::None,
+                DBCompressionType::None,
+                DBCompressionType::None,
+                DBCompressionType::Lz4,
+                DBCompressionType::Lz4,
+                DBCompressionType::Lz4,
+                DBCompressionType::Lz4,
+            ]);
+
+            options.set_use_direct_reads(true);
+            options.set_use_direct_io_for_flush_and_compaction(true);
+            options.set_compaction_readahead_size(2 * 1024 * 1024);
+
+            options.set_max_open_files(-1);
+            options.set_keep_log_file_num(1000);
+            options.set_max_manifest_file_size(1024 * 1024 * 1024);
+
+            options.set_paranoid_checks(true);
+            options.set_manual_wal_flush(false);
+            options.set_atomic_flush(true);
+
+            let mut write_opts = WriteOptions::default();
+            write_opts.disable_wal(false);
+            write_opts.set_sync(false);
+
+            let mut read_opts = ReadOptions::default();
+            read_opts.set_verify_checksums(true);
+            read_opts.set_async_io(true);
+            read_opts.set_readahead_size(2 * 1024 * 1024);
+
+            let db = DBWithThreadMode::<MultiThreaded>::open(&options, &self.0)?;
+
+            Ok((db, write_opts, read_opts))
+        }
+    }
+
+    impl Generator for Log {
+        fn generate(
+            &self,
+        ) -> anyhow::Result<(DBWithThreadMode<MultiThreaded>, WriteOptions, ReadOptions)> {
+            let mut block_opts = BlockBasedOptions::default();
+            let cache = Cache::new_lru_cache(128 * 1024 * 1024); // 128MB
+            block_opts.set_block_cache(&cache);
+            block_opts.set_bloom_filter(10.0, false);
+            block_opts.set_cache_index_and_filter_blocks(true);
+            block_opts.set_pin_l0_filter_and_index_blocks_in_cache(true);
+
+            let mut options = Options::default();
+            options.create_if_missing(true);
+            options.set_block_based_table_factory(&block_opts);
+            options.set_max_background_jobs(4);
+            options.set_bytes_per_sync(1024 * 1024);
+            options.set_write_buffer_size(64 * 1024 * 1024);
+            options.set_max_write_buffer_number(3);
+            options.set_min_write_buffer_number_to_merge(2);
+            options.set_max_bytes_for_level_base(256 * 1024 * 1024);
+            options.set_target_file_size_base(64 * 1024 * 1024);
+
+            options.set_compression_type(DBCompressionType::Lz4);
+            options.set_compression_per_level(&[
+                DBCompressionType::None,
+                DBCompressionType::None,
+                DBCompressionType::Lz4,
+                DBCompressionType::Lz4,
+                DBCompressionType::Lz4,
+                DBCompressionType::Lz4,
+                DBCompressionType::Zstd,
+            ]);
+
+            options.set_use_direct_reads(false);
+            options.set_use_direct_io_for_flush_and_compaction(true);
+            options.set_compaction_readahead_size(4 * 1024 * 1024);
+
+            options.set_max_open_files(10000);
+            options.set_keep_log_file_num(100);
+            options.set_max_manifest_file_size(128 * 1024 * 1024);
+
+            options.set_paranoid_checks(true);
+            options.set_manual_wal_flush(false);
+            options.set_atomic_flush(true);
+
+            let mut write_opts = WriteOptions::default();
+            write_opts.disable_wal(false);
+            write_opts.set_sync(false);
+
+            let mut read_opts = ReadOptions::default();
+            read_opts.set_verify_checksums(true);
+            read_opts.set_async_io(true);
+            read_opts.set_readahead_size(4 * 1024 * 1024);
+
+            let db = DBWithThreadMode::<MultiThreaded>::open(&options, &self.0)?;
+            Ok((db, write_opts, read_opts))
+        }
+    }
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct DBStats {
     pub total_entries: u64,
@@ -31,7 +178,6 @@ struct LocalDBInner {
     db: DBWithThreadMode<MultiThreaded>,
     write_opts: WriteOptions,
     read_opts: ReadOptions,
-    path: String,
 }
 
 /// 트랜잭션을 위한 래퍼 구조체 (WriteBatch 기반)
@@ -152,78 +298,6 @@ impl TransactionWrapper {
 }
 
 impl LocalDBInner {
-    fn new(path: String) -> anyhow::Result<Self> {
-        let p = Path::new(&path);
-
-        // 블록 캐시 설정 (4GB)
-        let mut block_opts = BlockBasedOptions::default();
-        let cache = Cache::new_lru_cache(4 * 1024 * 1024 * 1024);
-        block_opts.set_block_cache(&cache);
-        block_opts.set_bloom_filter(10.0, false);
-        block_opts.set_cache_index_and_filter_blocks(true);
-
-        // 데이터베이스 옵션 설정
-        let mut options = Options::default();
-        options.create_if_missing(true);
-        options.set_block_based_table_factory(&block_opts);
-
-        // 성능 최적화 설정
-        options.set_max_background_jobs(4);
-        options.set_bytes_per_sync(1024 * 1024);
-        options.set_write_buffer_size(64 * 1024 * 1024);
-        options.set_max_write_buffer_number(3);
-        options.set_min_write_buffer_number_to_merge(2);
-        options.set_max_bytes_for_level_base(256 * 1024 * 1024);
-        options.set_target_file_size_base(64 * 1024 * 1024);
-
-        // 압축 설정
-        options.set_compression_type(DBCompressionType::Lz4);
-        options.set_compression_per_level(&[
-            DBCompressionType::None,
-            DBCompressionType::None,
-            DBCompressionType::None,
-            DBCompressionType::Lz4,
-            DBCompressionType::Lz4,
-            DBCompressionType::Lz4,
-            DBCompressionType::Lz4,
-        ]);
-
-        // I/O 설정
-        options.set_use_direct_reads(true);
-        options.set_use_direct_io_for_flush_and_compaction(true);
-        options.set_compaction_readahead_size(2 * 1024 * 1024);
-
-        // 파일 관리 설정
-        options.set_max_open_files(-1);
-        options.set_keep_log_file_num(1000);
-        options.set_max_manifest_file_size(1024 * 1024 * 1024);
-
-        // 데이터 안정성 설정
-        options.set_paranoid_checks(true);
-        options.set_manual_wal_flush(false);
-        options.set_atomic_flush(true);
-
-        // Write 옵션 설정
-        let mut write_opts = WriteOptions::default();
-        write_opts.disable_wal(false);
-        write_opts.set_sync(false);
-
-        // Read 옵션 설정
-        let mut read_opts = ReadOptions::default();
-        read_opts.set_verify_checksums(true);
-        read_opts.set_async_io(true);
-        read_opts.set_readahead_size(2 * 1024 * 1024);
-
-        let db = DBWithThreadMode::<MultiThreaded>::open(&options, p)?;
-
-        Ok(LocalDBInner {
-            db,
-            write_opts,
-            read_opts,
-            path,
-        })
-    }
-
     fn put(&self, key: &[u8], value: &[u8]) -> anyhow::Result<()> {
         self.db
             .put_opt(key, value, &self.write_opts)
@@ -343,6 +417,10 @@ impl LocalDBInner {
     fn get_property(&self, name: &str) -> anyhow::Result<Option<String>> {
         self.db.property_value(name).map_err(anyhow::Error::from)
     }
+
+    fn get_path(&self) -> &Path {
+        self.db.path()
+    }
 }
 
 #[derive(Clone)]
@@ -351,11 +429,16 @@ pub struct LocalDB {
 }
 
 impl LocalDB {
-    pub async fn new(path: String) -> anyhow::Result<Self> {
-        let inner = task::spawn_blocking(move || LocalDBInner::new(path)).await??;
-
+    pub async fn new<T: config::Generator + Send + Sync + 'static>(
+        config: T,
+    ) -> anyhow::Result<Self> {
+        let (db, write_opts, read_opts) = task::spawn_blocking(move || config.generate()).await??;
         Ok(LocalDB {
-            inner: Arc::new(inner),
+            inner: Arc::new(LocalDBInner {
+                db,
+                write_opts,
+                read_opts,
+            }),
         })
     }
 
@@ -378,25 +461,19 @@ impl LocalDB {
     where
         T: for<'de> Deserialize<'de>,
     {
-        let inner = self.inner.clone();
-        if let Some(result) = task::spawn_blocking(move || inner.get(key.as_bytes()))
-            .await??
-            .map(|v| String::from_utf8(v))
-        {
-            let value: T = serde_json::from_str(&result?)?;
+        if let Some(data) = self.get(key.into_bytes()).await.and_then(|ret| {
+            ret.map(|v| String::from_utf8(v).map_err(anyhow::Error::from))
+                .transpose()
+        })? {
+            let value: T = serde_json::from_str(&data)?;
             Ok(Some(value))
         } else {
             Ok(None)
         }
     }
-
-    pub async fn put_json<T>(&self, key: String, value: &T) -> anyhow::Result<()>
-    where
-        T: Serialize,
-    {
+    pub async fn put_json<T: Serialize>(&self, key: String, value: &T) -> anyhow::Result<()> {
         let json_str = serde_json::to_string(value)?;
-        let inner = self.inner.clone();
-        task::spawn_blocking(move || inner.put(key.as_bytes(), json_str.as_bytes())).await?
+        self.put(key.into_bytes(), json_str.into_bytes()).await
     }
 
     pub async fn delete_json(&self, key: String) -> anyhow::Result<()> {
@@ -404,8 +481,8 @@ impl LocalDB {
         task::spawn_blocking(move || inner.delete(key.as_bytes())).await?
     }
 
-    pub fn get_path(&self) -> &str {
-        &self.inner.path
+    pub fn get_path(&self) -> &Path {
+        self.inner.db.path()
     }
 
     pub async fn get_stats(&self) -> DBStats {
