@@ -180,8 +180,8 @@ impl LocalDBInner {
         options.set_compression_type(DBCompressionType::Lz4);
         options.set_compression_per_level(&[
             DBCompressionType::None,
-            DBCompressionType::Lz4,
-            DBCompressionType::Lz4,
+            DBCompressionType::None,
+            DBCompressionType::None,
             DBCompressionType::Lz4,
             DBCompressionType::Lz4,
             DBCompressionType::Lz4,
