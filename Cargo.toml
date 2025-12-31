@@ -13,8 +13,9 @@ path = "src/lib.rs"
 before-build = true
 
 [dependencies]
-# tags
+# below are dependencies should be imported each project
 serde = { version = "1", features = ["derive", "rc"] }
+async-trait = "0.1"
 
 serde_json = "1"
 serde_urlencoded = "0.7"

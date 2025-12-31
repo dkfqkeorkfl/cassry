@@ -1,5 +1,7 @@
+use async_trait::async_trait;
 use rocksdb::{
-    BlockBasedOptions, Cache, DBCompressionType, DBWithThreadMode, MultiThreaded, Options, ReadOptions, WriteBatch, WriteOptions
+    BlockBasedOptions, Cache, DBCompressionType, DBWithThreadMode, MultiThreaded, Options,
+    ReadOptions, WriteBatch, WriteOptions,
 };
 use serde::{Deserialize, Serialize};
 use std::{path::Path, sync::Arc};
@@ -407,7 +409,9 @@ impl LocalDBInner {
     }
 
     fn commit(&self, batch: WriteBatch) -> anyhow::Result<()> {
-        self.db.write_opt(batch, &self.write_opts).map_err(anyhow::Error::from)
+        self.db
+            .write_opt(batch, &self.write_opts)
+            .map_err(anyhow::Error::from)
     }
 
     fn raw(&self) -> &DBWithThreadMode<MultiThreaded> {
@@ -519,6 +523,112 @@ impl LocalDBInner {
     }
 }
 
+#[async_trait(?Send)]
+pub trait LocalDbAccess {
+    async fn commit(&self, batch: WriteBatch) -> anyhow::Result<()>;
+    async fn put(&self, key: Arc<Vec<u8>>, value: Arc<Vec<u8>>) -> anyhow::Result<()>;
+    async fn get(&self, key: Arc<Vec<u8>>) -> anyhow::Result<Option<Vec<u8>>>;
+    async fn delete(&self, key: Arc<Vec<u8>>) -> anyhow::Result<()>;
+    async fn put_raw(&self, key: Vec<u8>, value: Vec<u8>) -> anyhow::Result<()>;
+    async fn get_raw(&self, key: Vec<u8>) -> anyhow::Result<Option<Vec<u8>>>;
+    async fn delete_raw(&self, key: Vec<u8>) -> anyhow::Result<()>;
+    async fn put_json(
+        &self,
+        key: &impl Serialize,
+        value: &impl Serialize,
+    ) -> anyhow::Result<()> {
+        let key_str = serde_json::to_string(key)?;
+        let json_str = serde_json::to_string(value)?;
+        self.put_raw(key_str.into_bytes(), json_str.into_bytes())
+            .await
+    }
+
+    async fn delete_json(
+        &self,
+        key: &impl Serialize,
+    ) -> anyhow::Result<()> {
+        let key_str = serde_json::to_string(key)?;
+        self.delete_raw(key_str.into_bytes()).await
+    }
+
+    async fn get_json<T>(&self, key: &impl Serialize) -> anyhow::Result<Option<T>>
+    where
+        T: for<'de> Deserialize<'de>,
+    {
+        let key_str = serde_json::to_string(key)?;
+        if let Some(data) = self.get_raw(key_str.into_bytes()).await.and_then(|ret| {
+            ret.map(|v| String::from_utf8(v).map_err(anyhow::Error::from))
+                .transpose()
+        })? {
+            let value: T = serde_json::from_str(&data)?;
+            Ok(Some(value))
+        } else {
+            Ok(None)
+        }
+    }
+
+    async fn put_bson(
+        &self,
+        key: &impl Serialize,
+        value: &impl Serialize,
+    ) -> anyhow::Result<()> {
+        let ks = bson::serialize_to_vec(key)?;
+        let bs = bson::serialize_to_vec(value)?;
+        self.put_raw(ks, bs).await
+    }
+
+    async fn delete_bson(
+        &self,
+        key: &impl Serialize,
+    ) -> anyhow::Result<()> {
+        let ks = bson::serialize_to_vec(key)?;
+        self.delete_raw(ks).await
+    }
+
+    async fn get_bson<T>(&self, key: &impl Serialize) -> anyhow::Result<Option<T>>
+    where
+        T: for<'de> Deserialize<'de>,
+    {
+        let ks = bson::serialize_to_vec(key)?;
+        if let Some(data) = self.get_raw(ks).await? {
+            let value: T = bson::deserialize_from_slice(&data)?;
+            Ok(Some(value))
+        } else {
+            Ok(None)
+        }
+    }
+
+    async fn put_postcard(
+        &self,
+        key: &impl Serialize,
+        value: &impl Serialize,
+    ) -> anyhow::Result<()> {
+        let bs = postcard::to_stdvec(value)?;
+        let ks = postcard::to_stdvec(key)?;
+        self.put_raw(ks, bs).await
+    }
+
+    async fn delete_postcard(
+        &self,
+        key: &impl Serialize,
+    ) -> anyhow::Result<()> {
+        let ks = postcard::to_stdvec(key)?;
+        self.delete_raw(ks).await
+    }
+
+    async fn get_postcard<T>(&self, key: &impl Serialize) -> anyhow::Result<Option<T>>
+    where
+        T: for<'de> Deserialize<'de>,
+    {
+        let ks = postcard::to_stdvec(key)?;
+        if let Some(data) = self.get_raw(ks).await? {
+            let value: T = postcard::from_bytes(&data)?;
+            Ok(Some(value))
+        } else {
+            Ok(None)
+        }
+    }
+}
 #[derive(Clone)]
 pub struct LocalDB {
     inner: Arc<LocalDBInner>,
@@ -541,98 +651,9 @@ impl LocalDB {
     pub fn raw(&self) -> &DBWithThreadMode<MultiThreaded> {
         &self.inner.raw()
     }
-    
-    pub async fn commit(&self, batch: WriteBatch) -> anyhow::Result<()> {
-        let inner = self.inner.clone();
-        task::spawn_blocking(move || inner.commit(batch)).await?
-    }
-
-    pub async fn put(&self, key: Arc<Vec<u8>>, value: Arc<Vec<u8>>) -> anyhow::Result<()> {
-        let inner = self.inner.clone();
-        task::spawn_blocking(move || inner.put(&key, &value)).await?
-    }
-
-    pub async fn get(&self, key: Arc<Vec<u8>>) -> anyhow::Result<Option<Vec<u8>>> {
-        let inner = self.inner.clone();
-        task::spawn_blocking(move || inner.get(&key)).await?
-    }
-
-    pub async fn delete(&self, key: Arc<Vec<u8>>) -> anyhow::Result<()> {
-        let inner = self.inner.clone();
-        task::spawn_blocking(move || inner.delete(&key)).await?
-    }
-
-    pub async fn put_raw(&self, key: Vec<u8>, value: Vec<u8>) -> anyhow::Result<()> {
-        let inner = self.inner.clone();
-        task::spawn_blocking(move || inner.put(&key, &value)).await?
-    }
-
-    pub async fn get_raw(&self, key: Vec<u8>) -> anyhow::Result<Option<Vec<u8>>> {
-        let inner = self.inner.clone();
-        task::spawn_blocking(move || inner.get(&key)).await?
-    }
-
-    pub async fn delete_raw(&self, key: Vec<u8>) -> anyhow::Result<()> {
-        let inner = self.inner.clone();
-        task::spawn_blocking(move || inner.delete(&key)).await?
-    }
 
     pub async fn delete_by_str(&self, key: String) -> anyhow::Result<()> {
         self.delete_raw(key.into_bytes()).await
-    }
-
-    pub async fn put_json<T: Serialize>(&self, key: String, value: &T) -> anyhow::Result<()> {
-        let json_str = serde_json::to_string(value)?;
-        self.put_raw(key.into_bytes(), json_str.into_bytes()).await
-    }
-
-    pub async fn get_json<T>(&self, key: String) -> anyhow::Result<Option<T>>
-    where
-        T: for<'de> Deserialize<'de>,
-    {
-        if let Some(data) = self.get_raw(key.into_bytes()).await.and_then(|ret| {
-            ret.map(|v| String::from_utf8(v).map_err(anyhow::Error::from))
-                .transpose()
-        })? {
-            let value: T = serde_json::from_str(&data)?;
-            Ok(Some(value))
-        } else {
-            Ok(None)
-        }
-    }
-
-    pub async fn put_bson<T: Serialize>(&self, key: String, value: &T) -> anyhow::Result<()> {
-        let bs = bson::serialize_to_vec(value)?;
-        self.put_raw(key.into_bytes(), bs).await
-    }
-
-    pub async fn get_bson<T>(&self, key: String) -> anyhow::Result<Option<T>>
-    where
-        T: for<'de> Deserialize<'de>,
-    {
-        if let Some(data) = self.get_raw(key.into_bytes()).await? {
-            let value: T = bson::deserialize_from_slice(&data)?;
-            Ok(Some(value))
-        } else {
-            Ok(None)
-        }
-    }
-
-    pub async fn put_postcard<T: Serialize>(&self, key: String, value: &T) -> anyhow::Result<()> {
-        let bs = postcard::to_stdvec(value)?;
-        self.put_raw(key.into_bytes(), bs).await
-    }
-
-    pub async fn get_postcard<T>(&self, key: String) -> anyhow::Result<Option<T>>
-    where
-        T: for<'de> Deserialize<'de>,
-    {
-        if let Some(data) = self.get_raw(key.into_bytes()).await? {
-            let value: T = postcard::from_bytes(&data)?;
-            Ok(Some(value))
-        } else {
-            Ok(None)
-        }
     }
 
     pub fn get_path(&self) -> &Path {
@@ -717,5 +738,43 @@ impl LocalDB {
     /// ```
     pub fn transaction(&self) -> TransactionWrapper {
         TransactionWrapper::new(self.inner.clone())
+    }
+}
+
+#[async_trait(?Send)]
+impl LocalDbAccess for LocalDB {
+    async fn commit(&self, batch: WriteBatch) -> anyhow::Result<()> {
+        let inner = self.inner.clone();
+        task::spawn_blocking(move || inner.commit(batch)).await?
+    }
+
+    async fn put(&self, key: Arc<Vec<u8>>, value: Arc<Vec<u8>>) -> anyhow::Result<()> {
+        let inner = self.inner.clone();
+        task::spawn_blocking(move || inner.put(&key, &value)).await?
+    }
+
+    async fn get(&self, key: Arc<Vec<u8>>) -> anyhow::Result<Option<Vec<u8>>> {
+        let inner = self.inner.clone();
+        task::spawn_blocking(move || inner.get(&key)).await?
+    }
+
+    async fn delete(&self, key: Arc<Vec<u8>>) -> anyhow::Result<()> {
+        let inner = self.inner.clone();
+        task::spawn_blocking(move || inner.delete(&key)).await?
+    }
+
+    async fn put_raw(&self, key: Vec<u8>, value: Vec<u8>) -> anyhow::Result<()> {
+        let inner = self.inner.clone();
+        task::spawn_blocking(move || inner.put(&key, &value)).await?
+    }
+
+    async fn get_raw(&self, key: Vec<u8>) -> anyhow::Result<Option<Vec<u8>>> {
+        let inner = self.inner.clone();
+        task::spawn_blocking(move || inner.get(&key)).await?
+    }
+
+    async fn delete_raw(&self, key: Vec<u8>) -> anyhow::Result<()> {
+        let inner = self.inner.clone();
+        task::spawn_blocking(move || inner.delete(&key)).await?
     }
 }
