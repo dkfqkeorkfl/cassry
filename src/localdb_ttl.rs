@@ -248,7 +248,7 @@ struct DBSchema2025121601 {
     pub expired_at: ExpiredAt,
     #[serde(with = "datetime_milliseconds")]
     pub updated_at: DateTime<Utc>,
-    pub value: Vec<u8>,
+    pub value: Arc<Vec<u8>>,
 }
 
 impl DBSchema2025121601 {
@@ -406,7 +406,7 @@ impl LocalDBTTL {
     pub async fn put(
         &self,
         key: Arc<Vec<u8>>,
-        value: Vec<u8>,
+        value: Arc<Vec<u8>>,
         expired_at: ExpiredAt,
     ) -> anyhow::Result<()> {
         let new_item = DBSchema {
@@ -486,9 +486,15 @@ impl LocalDBTTL {
                     self.ctx.ttl_index.commit(batch).await?;
                 }
 
-                Ok(Some(db_value.value))
+                Ok(Some(
+                    Arc::try_unwrap(db_value.value)
+                        .map_err(|_| anyhow::anyhow!("value is not unique"))?,
+                ))
             }
-            ExpiredAt::Live(_) => Ok(Some(db_value.value)),
+            ExpiredAt::Live(_) => Ok(Some(
+                Arc::try_unwrap(db_value.value)
+                    .map_err(|_| anyhow::anyhow!("value is not unique"))?,
+            )),
         }
     }
 
@@ -792,8 +798,6 @@ pub async fn test() -> anyhow::Result<()> {
         src.clear();
     }
 
-
-    
     while src.len() < 20 {
         let start = std::time::Instant::now();
         src.push(src.len().into());
