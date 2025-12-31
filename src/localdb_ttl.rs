@@ -1,4 +1,4 @@
-use chrono::{DateTime, Utc};
+use chrono::{DateTime, Timelike, Utc};
 use keyed_lock::r#async::KeyedLock;
 use rocksdb::{IteratorMode, WriteBatch as RocksWriteBatch};
 use serde::{Deserialize, Serialize};
@@ -516,7 +516,12 @@ impl LocalDBTTL {
         Ok(())
     }
 
-    pub async fn put_raw(&self, key: Vec<u8>, value: Vec<u8>, expired_at: ExpiredAt) -> anyhow::Result<()> {
+    pub async fn put_raw(
+        &self,
+        key: Vec<u8>,
+        value: Vec<u8>,
+        expired_at: ExpiredAt,
+    ) -> anyhow::Result<()> {
         self.put(key.into(), value.into(), expired_at).await
     }
 
@@ -536,13 +541,11 @@ impl LocalDBTTL {
     ) -> anyhow::Result<()> {
         let key_str = serde_json::to_string(key)?;
         let json_str = serde_json::to_string(value)?;
-        self.put_raw(key_str.into_bytes(), json_str.into_bytes(), expired_at).await
+        self.put_raw(key_str.into_bytes(), json_str.into_bytes(), expired_at)
+            .await
     }
 
-    pub async fn delete_json(
-        &self,
-        key: &impl Serialize,
-    ) -> anyhow::Result<()> {
+    pub async fn delete_json(&self, key: &impl Serialize) -> anyhow::Result<()> {
         let key_str = serde_json::to_string(key)?;
         self.delete_raw(key_str.into_bytes()).await
     }
@@ -569,16 +572,13 @@ impl LocalDBTTL {
         value: &impl Serialize,
         expired_at: ExpiredAt,
     ) -> anyhow::Result<()> {
-        let ks = bson::serialize_to_vec(key)?;
-        let bs = bson::serialize_to_vec(value)?;
-        self.put_raw(ks, bs, expired_at).await
+        let ks = bson_key(key)?;
+        let vs = bson::ser::serialize_to_vec(value)?;
+        self.put_raw(ks, vs, expired_at).await
     }
 
-    pub async fn delete_bson(
-        &self,
-        key: &impl Serialize,
-    ) -> anyhow::Result<()> {
-        let ks = bson::serialize_to_vec(key)?;
+    pub async fn delete_bson(&self, key: &impl Serialize) -> anyhow::Result<()> {
+        let ks = bson_key(key)?;
         self.delete_raw(ks).await
     }
 
@@ -586,7 +586,7 @@ impl LocalDBTTL {
     where
         T: for<'de> Deserialize<'de>,
     {
-        let ks = bson::serialize_to_vec(key)?;
+        let ks = bson_key(key)?;
         if let Some(data) = self.get_raw(ks).await? {
             let value: T = bson::deserialize_from_slice(&data)?;
             Ok(Some(value))
@@ -606,10 +606,7 @@ impl LocalDBTTL {
         self.put_raw(ks, bs, expired_at).await
     }
 
-    pub async fn delete_postcard(
-        &self,
-        key: &impl Serialize,
-    ) -> anyhow::Result<()> {
+    pub async fn delete_postcard(&self, key: &impl Serialize) -> anyhow::Result<()> {
         let ks = postcard::to_stdvec(key)?;
         self.delete_raw(ks).await
     }
@@ -642,4 +639,215 @@ impl LocalDBTTL {
     pub fn get_created_at(&self) -> &DateTime<Utc> {
         &self.ctx.access_db.get_created_at()
     }
+}
+
+pub async fn test() -> anyhow::Result<()> {
+    #[derive(Serialize, Deserialize, Debug)]
+    struct Test {
+        id: u32,
+    }
+    impl From<u32> for Test {
+        fn from(id: u32) -> Self {
+            Test { id }
+        }
+    }
+
+    let interval = std::time::Duration::from_secs(1);
+    let db = LocalDBTTL::new(
+        "test_ttldb_live".to_string(),
+        std::time::Duration::from_secs(1),
+        None,
+    )
+    .await?;
+    let mut src = Vec::<Test>::new();
+    while src.len() < 20 {
+        let start = std::time::Instant::now();
+        src.push(Utc::now().second().into());
+        let item = src.last().unwrap();
+        db.put_json(
+            &item.id,
+            item,
+            ExpiredAt::Live(Utc::now() + chrono::Duration::seconds(5)),
+        )
+        .await?;
+        if item.id % 2 == 0 {
+            db.delete_json(&item.id).await?;
+        }
+
+        let mut results = Vec::<String>::new();
+        for i in src.iter().rev() {
+            let result = db.get_json::<Test>(&i.id).await?;
+            if let Some(x) = result {
+                results.push(format!("{}(o)", x.id));
+            } else {
+                results.push(format!("{}(x)", i.id));
+            }
+        }
+        println!("[ttldb] json: {}", results.join(", "));
+
+        let remaining = interval.saturating_sub(start.elapsed());
+        tokio::time::sleep(remaining).await;
+    }
+
+    {
+        let mut results = Vec::<String>::new();
+        for i in src.iter().rev() {
+            db.delete_json(&i.id).await?;
+            let result = db.get_json::<Test>(&i.id).await?;
+            if let Some(x) = result {
+                results.push(format!("{}(o)", x.id));
+            } else {
+                results.push(format!("{}(x)", i.id));
+            }
+        }
+        println!("[ttldb] delete: {}", results.join(", "));
+        src.clear();
+    }
+
+    while src.len() < 20 {
+        let start = std::time::Instant::now();
+        src.push(Utc::now().second().into());
+        let item = src.last().unwrap();
+        db.put_bson(
+            &item.id,
+            item,
+            ExpiredAt::Live(Utc::now() + chrono::Duration::seconds(5)),
+        )
+        .await?;
+        if item.id % 2 == 0 {
+            db.delete_bson(&item.id).await?;
+        }
+
+        let mut results = Vec::<String>::new();
+        for i in src.iter().rev() {
+            let result = db.get_bson::<Test>(&i.id).await?;
+            if let Some(x) = result {
+                results.push(format!("{}(o)", x.id));
+            } else {
+                results.push(format!("{}(x)", i.id));
+            }
+        }
+        println!("[ttldb] bson: {}", results.join(", "));
+
+        let remaining = interval.saturating_sub(start.elapsed());
+        tokio::time::sleep(remaining).await;
+    }
+
+    {
+        let mut results = Vec::<String>::new();
+        for i in src.iter().rev() {
+            db.delete_bson(&i.id).await?;
+            let result = db.get_bson::<Test>(&i.id).await?;
+            if let Some(x) = result {
+                results.push(format!("{}(o)", x.id));
+            } else {
+                results.push(format!("{}(x)", i.id));
+            }
+        }
+        println!("[ttldb] delete: {}", results.join(", "));
+        src.clear();
+    }
+
+    while src.len() < 20 {
+        let start = std::time::Instant::now();
+        src.push(Utc::now().second().into());
+        let item = src.last().unwrap();
+        db.put_postcard(
+            &item.id,
+            item,
+            ExpiredAt::Live(Utc::now() + chrono::Duration::seconds(5)),
+        )
+        .await?;
+        if item.id % 2 == 0 {
+            db.delete_postcard(&item.id).await?;
+        }
+
+        let mut results = Vec::<String>::new();
+        for i in src.iter().rev() {
+            let result = db.get_postcard::<Test>(&i.id).await?;
+            if let Some(x) = result {
+                results.push(format!("{}(o)", x.id));
+            } else {
+                results.push(format!("{}(x)", i.id));
+            }
+        }
+        println!("[ttldb] postcard: {}", results.join(", "));
+
+        let remaining = interval.saturating_sub(start.elapsed());
+        tokio::time::sleep(remaining).await;
+    }
+
+    {
+        let mut results = Vec::<String>::new();
+        for i in src.iter().rev() {
+            db.delete_postcard(&i.id).await?;
+            let result = db.get_postcard::<Test>(&i.id).await?;
+            if let Some(x) = result {
+                results.push(format!("{}(o)", x.id));
+            } else {
+                results.push(format!("{}(x)", i.id));
+            }
+        }
+        println!("[ttldb] delete: {}", results.join(", "));
+        src.clear();
+    }
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+    
+    while src.len() < 20 {
+        let start = std::time::Instant::now();
+        src.push(Utc::now().second().into());
+        let item = src.last().unwrap();
+        db.put_json(
+            &item.id,
+            item,
+            ExpiredAt::Idle(chrono::Duration::seconds(5)),
+        )
+        .await?;
+
+        let mut results = Vec::<String>::new();
+        for (i, item) in src.iter().rev().enumerate() {
+            if i % 2 == 0 {
+                continue;
+            }
+
+            let result = db.get_json::<Test>(&item.id).await?;
+            if let Some(x) = result {
+                results.push(format!("{}(o)", x.id));
+            } else {
+                results.push(format!("{}(x)", item.id));
+            }
+        }
+        println!("[ttldb] json: {}", results.join(", "));
+
+        let remaining = interval.saturating_sub(start.elapsed());
+        tokio::time::sleep(remaining).await;
+    }
+
+    {
+        let mut results = Vec::<String>::new();
+        for i in src.iter().rev() {
+            let result = db.get_json::<Test>(&i.id).await?;
+            if let Some(x) = result {
+                results.push(format!("{}(o)", x.id));
+            } else {
+                results.push(format!("{}(x)", i.id));
+            }
+        }
+        println!("[ttldb] idle: {}", results.join(", "));
+    }
+    Ok(())
 }

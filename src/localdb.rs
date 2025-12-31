@@ -1,4 +1,5 @@
-use chrono::{DateTime, Utc};
+use bson::doc;
+use chrono::{DateTime, Timelike, Utc};
 use rocksdb::{
     BlockBasedOptions, Cache, DBCompressionType, DBWithThreadMode, MultiThreaded, Options,
     ReadOptions, WriteBatch, WriteOptions,
@@ -460,26 +461,22 @@ impl LocalDB {
         key: &impl Serialize,
         value: &impl Serialize,
     ) -> anyhow::Result<()> {
-        let key_str = serde_json::to_string(key)?;
-        let json_str = serde_json::to_string(value)?;
-        self.put_raw(key_str.into_bytes(), json_str.into_bytes())
-            .await
+        let ks = serde_json::to_string(key)?;
+        let vs = serde_json::to_string(value)?;
+        self.put_raw(ks.into_bytes(), vs.into_bytes()).await
     }
 
-    pub async fn delete_json(
-        &self,
-        key: &impl Serialize,
-    ) -> anyhow::Result<()> {
-        let key_str = serde_json::to_string(key)?;
-        self.delete_raw(key_str.into_bytes()).await
+    pub async fn delete_json(&self, key: &impl Serialize) -> anyhow::Result<()> {
+        let ks = serde_json::to_string(key)?;
+        self.delete_raw(ks.into_bytes()).await
     }
 
     pub async fn get_json<T>(&self, key: &impl Serialize) -> anyhow::Result<Option<T>>
     where
         T: for<'de> Deserialize<'de>,
     {
-        let key_str = serde_json::to_string(key)?;
-        if let Some(data) = self.get_raw(key_str.into_bytes()).await.and_then(|ret| {
+        let ks = serde_json::to_string(key)?;
+        if let Some(data) = self.get_raw(ks.into_bytes()).await.and_then(|ret| {
             ret.map(|v| String::from_utf8(v).map_err(anyhow::Error::from))
                 .transpose()
         })? {
@@ -495,16 +492,13 @@ impl LocalDB {
         key: &impl Serialize,
         value: &impl Serialize,
     ) -> anyhow::Result<()> {
-        let ks = bson::serialize_to_vec(key)?;
-        let bs = bson::serialize_to_vec(value)?;
-        self.put_raw(ks, bs).await
+        let ks = bson_key(key)?;
+        let vs = bson::ser::serialize_to_vec(value)?;
+        self.put_raw(ks, vs).await
     }
 
-    pub async fn delete_bson(
-        &self,
-        key: &impl Serialize,
-    ) -> anyhow::Result<()> {
-        let ks = bson::serialize_to_vec(key)?;
+    pub async fn delete_bson(&self, key: &impl Serialize) -> anyhow::Result<()> {
+        let ks = bson_key(key)?;
         self.delete_raw(ks).await
     }
 
@@ -512,7 +506,7 @@ impl LocalDB {
     where
         T: for<'de> Deserialize<'de>,
     {
-        let ks = bson::serialize_to_vec(key)?;
+        let ks = bson_key(key)?;
         if let Some(data) = self.get_raw(ks).await? {
             let value: T = bson::deserialize_from_slice(&data)?;
             Ok(Some(value))
@@ -531,10 +525,7 @@ impl LocalDB {
         self.put_raw(ks, bs).await
     }
 
-    pub async fn delete_postcard(
-        &self,
-        key: &impl Serialize,
-    ) -> anyhow::Result<()> {
+    pub async fn delete_postcard(&self, key: &impl Serialize) -> anyhow::Result<()> {
         let ks = postcard::to_stdvec(key)?;
         self.delete_raw(ks).await
     }
@@ -551,7 +542,6 @@ impl LocalDB {
             Ok(None)
         }
     }
-
 
     pub fn raw(&self) -> &DBWithThreadMode<MultiThreaded> {
         &self.inner.raw()
@@ -584,15 +574,6 @@ impl LocalDB {
             })
     }
 
-    pub async fn compact_range(&self) {
-        let inner = self.inner.clone();
-        task::spawn_blocking(move || inner.compact_range())
-            .await
-            .unwrap_or_else(|e| {
-                eprintln!("Error in compact_range: {}", e);
-            });
-    }
-
     pub async fn flush(&self) -> anyhow::Result<()> {
         let inner = self.inner.clone();
         task::spawn_blocking(move || inner.flush()).await?
@@ -606,4 +587,149 @@ impl LocalDB {
     pub fn get_created_at(&self) -> &DateTime<Utc> {
         &self.created_at
     }
+}
+
+pub fn bson_key(key: &impl Serialize) -> anyhow::Result<Vec<u8>> {
+    let result = match bson::ser::serialize_to_vec(key) {
+        Ok(ks) => ks,
+        Err(_) => {
+            let ks = doc! { "k" : bson::ser::serialize_to_bson(key)?};
+            ks.to_vec()?
+        }
+    };
+    Ok(result)
+}
+
+pub async fn test() -> anyhow::Result<()> {
+    #[derive(Serialize, Deserialize, Debug)]
+    struct Test {
+        id: usize,
+    }
+    impl From<usize> for Test {
+        fn from(id: usize) -> Self {
+            Test { id }
+        }
+    }
+
+    let interval = std::time::Duration::from_secs(1);
+    let db = LocalDB::new(config::General::new("test_localdb".to_string())).await?;
+    let mut src = Vec::<Test>::new();
+    while src.len() < 20 {
+        let start = std::time::Instant::now();
+        src.push(src.len().into());
+        let item = src.last().unwrap();
+        db.put_json(&item.id, item).await?;
+        if item.id % 2 == 0 {
+            db.delete_json(&item.id).await?;
+        }
+
+        let mut results = Vec::<String>::new();
+        for i in src.iter().rev() {
+            let result = db.get_json::<Test>(&i.id).await?;
+            if let Some(x) = result {
+                results.push(format!("{}(o)", x.id));
+            } else {
+                results.push(format!("{}(x)", i.id));
+            }
+        }
+        println!("[localdb] json: {}", results.join(", "));
+
+        let remaining = interval.saturating_sub(start.elapsed());
+        tokio::time::sleep(remaining).await;
+    }
+
+    {
+        let mut results = Vec::<String>::new();
+        for i in src.iter().rev() {
+            db.delete_json(&i.id).await?;
+            let result = db.get_json::<Test>(&i.id).await?;
+            if let Some(x) = result {
+                results.push(format!("{}(o)", x.id));
+            } else {
+                results.push(format!("{}(x)", i.id));
+            }
+        }
+        println!("[localdb] delete: {}", results.join(", "));
+        src.clear();
+    }
+
+    while src.len() < 20 {
+        let start = std::time::Instant::now();
+        src.push(src.len().into());
+        let item = src.last().unwrap();
+        db.put_bson(&item.id, item).await?;
+        if item.id % 2 == 0 {
+            db.delete_bson(&item.id).await?;
+        }
+
+        let mut results = Vec::<String>::new();
+        for i in src.iter().rev() {
+            let result = db.get_bson::<Test>(&i.id).await?;
+            if let Some(x) = result {
+                results.push(format!("{}(o)", x.id));
+            } else {
+                results.push(format!("{}(x)", i.id));
+            }
+        }
+        println!("[localdb] bson: {}", results.join(", "));
+
+        let remaining = interval.saturating_sub(start.elapsed());
+        tokio::time::sleep(remaining).await;
+    }
+
+    {
+        let mut results = Vec::<String>::new();
+        for i in src.iter().rev() {
+            db.delete_bson(&i.id).await?;
+            let result = db.get_bson::<Test>(&i.id).await?;
+            if let Some(x) = result {
+                results.push(format!("{}(o)", x.id));
+            } else {
+                results.push(format!("{}(x)", i.id));
+            }
+        }
+        println!("[localdb] delete: {}", results.join(", "));
+        src.clear();
+    }
+
+    while src.len() < 20 {
+        let start = std::time::Instant::now();
+        src.push(src.len().into());
+        let item = src.last().unwrap();
+        db.put_postcard(&item.id, item).await?;
+        if item.id % 2 == 0 {
+            db.delete_postcard(&item.id).await?;
+        }
+
+        let mut results = Vec::<String>::new();
+        for i in src.iter().rev() {
+            let result = db.get_postcard::<Test>(&i.id).await?;
+            if let Some(x) = result {
+                results.push(format!("{}(o)", x.id));
+            } else {
+                results.push(format!("{}(x)", i.id));
+            }
+        }
+        println!("[localdb] postcard: {}", results.join(", "));
+
+        let remaining = interval.saturating_sub(start.elapsed());
+        tokio::time::sleep(remaining).await;
+    }
+
+    {
+        let mut results = Vec::<String>::new();
+        for i in src.iter().rev() {
+            db.delete_postcard(&i.id).await?;
+            let result = db.get_postcard::<Test>(&i.id).await?;
+            if let Some(x) = result {
+                results.push(format!("{}(o)", x.id));
+            } else {
+                results.push(format!("{}(x)", i.id));
+            }
+        }
+        println!("[localdb] delete: {}", results.join(", "));
+        src.clear();
+    }
+
+    Ok(())
 }

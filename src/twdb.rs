@@ -1,7 +1,8 @@
-use chrono::{DateTime, Duration, TimeZone, Utc};
+use chrono::{DateTime, Duration, TimeZone, Timelike, Utc};
+use futures::FutureExt;
 use serde::{Deserialize, Serialize};
 use std::fs;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use tokio::sync::RwLock;
 
@@ -36,7 +37,10 @@ pub struct TimeWindowDBConfig {
 }
 
 impl TimeWindowDBConfig {
-    fn get_folder_name(&self, timestamp: &DateTime<Utc>) -> anyhow::Result<(String, DateTime<Utc>)> {
+    fn get_folder_name(
+        &self,
+        timestamp: &DateTime<Utc>,
+    ) -> anyhow::Result<(String, DateTime<Utc>)> {
         const SECONDS_IN_DAY: i64 = 24 * 60 * 60; // 86400 seconds
         let ttl_seconds = self.ttl.num_seconds();
 
@@ -51,14 +55,20 @@ impl TimeWindowDBConfig {
         let folder_timestamp = (seconds / ttl_seconds) * ttl_seconds;
         let folder_time = Utc.timestamp_opt(folder_timestamp, 0).unwrap();
 
-        Ok((format!(
-            "{}/{}",
-            self.base_path,
-            folder_time.format("%Y-%m-%d_%H-%M-%S")
-        ), folder_time))
+        Ok((
+            format!(
+                "{}/{}",
+                self.base_path,
+                folder_time.format("%Y-%m-%d_%H-%M-%S")
+            ),
+            folder_time,
+        ))
     }
 
-    async fn get_localdb(&self, timestamp: &DateTime<Utc>) -> anyhow::Result<(LocalDB, DateTime<Utc>)> {
+    async fn get_localdb(
+        &self,
+        timestamp: &DateTime<Utc>,
+    ) -> anyhow::Result<(LocalDB, DateTime<Utc>)> {
         let (path, folder_time) = self.get_folder_name(timestamp)?;
         let db = match self.ty {
             TimeWindowType::General => LocalDB::new(config::General::new(path)).await,
@@ -83,6 +93,14 @@ pub struct TimeWindowDB {
 impl TimeWindowDB {
     pub fn get_created_at(&self) -> &DateTime<Utc> {
         &self.created_at
+    }
+
+    pub fn get_config(&self) -> &TimeWindowDBConfig {
+        &self.config
+    }
+
+    pub async fn get_current_path(&self) -> PathBuf {
+        self.ctx.read().await.current_db.get_path().to_path_buf()
     }
 
     pub async fn new(config: TimeWindowDBConfig) -> anyhow::Result<Self> {
@@ -157,7 +175,7 @@ impl TimeWindowDB {
         self.try_rotate().await?;
         self.ctx.read().await.current_db.delete_raw(key).await
     }
-    
+
     pub async fn put_json(
         &self,
         key: &impl Serialize,
@@ -169,10 +187,7 @@ impl TimeWindowDB {
             .await
     }
 
-    pub async fn delete_json(
-        &self,
-        key: &impl Serialize,
-    ) -> anyhow::Result<()> {
+    pub async fn delete_json(&self, key: &impl Serialize) -> anyhow::Result<()> {
         let key_str = serde_json::to_string(key)?;
         self.delete_raw(key_str.into_bytes()).await
     }
@@ -198,16 +213,13 @@ impl TimeWindowDB {
         key: &impl Serialize,
         value: &impl Serialize,
     ) -> anyhow::Result<()> {
-        let ks = bson::serialize_to_vec(key)?;
-        let bs = bson::serialize_to_vec(value)?;
-        self.put_raw(ks, bs).await
+        let ks = bson_key(key)?;
+        let vs = bson::ser::serialize_to_vec(value)?;
+        self.put_raw(ks, vs).await
     }
 
-    pub async fn delete_bson(
-        &self,
-        key: &impl Serialize,
-    ) -> anyhow::Result<()> {
-        let ks = bson::serialize_to_vec(key)?;
+    pub async fn delete_bson(&self, key: &impl Serialize) -> anyhow::Result<()> {
+        let ks = bson_key(key)?;
         self.delete_raw(ks).await
     }
 
@@ -215,7 +227,7 @@ impl TimeWindowDB {
     where
         T: for<'de> Deserialize<'de>,
     {
-        let ks = bson::serialize_to_vec(key)?;
+        let ks = bson_key(key)?;
         if let Some(data) = self.get_raw(ks).await? {
             let value: T = bson::deserialize_from_slice(&data)?;
             Ok(Some(value))
@@ -234,10 +246,7 @@ impl TimeWindowDB {
         self.put_raw(ks, bs).await
     }
 
-    pub async fn delete_postcard(
-        &self,
-        key: &impl Serialize,
-    ) -> anyhow::Result<()> {
+    pub async fn delete_postcard(&self, key: &impl Serialize) -> anyhow::Result<()> {
         let ks = postcard::to_stdvec(key)?;
         self.delete_raw(ks).await
     }
@@ -254,6 +263,156 @@ impl TimeWindowDB {
             Ok(None)
         }
     }
+}
 
+pub async fn test() -> anyhow::Result<()> {
+    #[derive(Serialize, Deserialize, Debug)]
+    struct Test {
+        id: u32,
+    }
+    impl From<u32> for Test {
+        fn from(id: u32) -> Self {
+            Test { id }
+        }
+    }
 
+    let interval = std::time::Duration::from_secs(1);
+    let test = TimeWindowDBConfig {
+        base_path: "test_twdb".to_string(),
+        ttl: Duration::seconds(5),
+        delete_legacy: true,
+        ty: TimeWindowType::Log,
+    };
+    let db = TimeWindowDB::new(test).await?;
+    let mut src = Vec::<Test>::new();
+    while src.len() < 20 {
+        let start = std::time::Instant::now();
+        src.push(Utc::now().second().into());
+        let item = src.last().unwrap();
+        db.put_json(&item.id, item).await?;
+        if item.id % 2 == 0 {
+            db.delete_json(&item.id).await?;
+        }
+
+        let mut results = Vec::<String>::new();
+        for i in src.iter().rev() {
+            let result = db.get_json::<Test>(&i.id).await?;
+            if let Some(x) = result {
+                results.push(format!(
+                    "{}({})",
+                    x.id,
+                    db.get_current_path().await.display()
+                ));
+            } else {
+                results.push(format!("{}(x)", i.id));
+            }
+        }
+        println!("[twdb] json: {}", results.join(", "));
+
+        let remaining = interval.saturating_sub(start.elapsed());
+        tokio::time::sleep(remaining).await;
+    }
+
+    {
+        let mut results = Vec::<String>::new();
+        for i in src.iter().rev() {
+            db.delete_json(&i.id).await?;
+            let result = db.get_json::<Test>(&i.id).await?;
+            if let Some(x) = result {
+                results.push(format!("{}(o)", x.id));
+            } else {
+                results.push(format!("{}(x)", i.id));
+            }
+        }
+        println!("[localdb] delete: {}", results.join(", "));
+        src.clear();
+    }
+
+    while src.len() < 20 {
+        let start = std::time::Instant::now();
+        src.push(Utc::now().second().into());
+        let item = src.last().unwrap();
+        db.put_bson(&item.id, item).await?;
+        if item.id % 2 == 0 {
+            db.delete_bson(&item.id).await?;
+        }
+
+        let mut results = Vec::<String>::new();
+        for i in src.iter().rev() {
+            let result = db.get_bson::<Test>(&i.id).await?;
+            if let Some(x) = result {
+                results.push(format!(
+                    "{}({})",
+                    x.id,
+                    db.get_current_path().await.display()
+                ));
+            } else {
+                results.push(format!("{}(x)", i.id));
+            }
+        }
+        println!("[twdb] bson: {}", results.join(", "));
+
+        let remaining = interval.saturating_sub(start.elapsed());
+        tokio::time::sleep(remaining).await;
+    }
+
+    {
+        let mut results = Vec::<String>::new();
+        for i in src.iter().rev() {
+            db.delete_bson(&i.id).await?;
+            let result = db.get_bson::<Test>(&i.id).await?;
+            if let Some(x) = result {
+                results.push(format!("{}(o)", x.id));
+            } else {
+                results.push(format!("{}(x)", i.id));
+            }
+        }
+        println!("[localdb] delete: {}", results.join(", "));
+        src.clear();
+    }
+
+    while src.len() < 20 {
+        let start = std::time::Instant::now();
+        src.push(Utc::now().second().into());
+        let item = src.last().unwrap();
+        db.put_postcard(&item.id, item).await?;
+        if item.id % 2 == 0 {
+            db.delete_postcard(&item.id).await?;
+        }
+
+        let mut results = Vec::<String>::new();
+        for i in src.iter().rev() {
+            let result = db.get_postcard::<Test>(&i.id).await?;
+            if let Some(x) = result {
+                results.push(format!(
+                    "{}({})",
+                    x.id,
+                    db.get_current_path().await.display()
+                ));
+            } else {
+                results.push(format!("{}(x)", i.id));
+            }
+        }
+        println!("[twdb] postcard: {}", results.join(", "));
+
+        let remaining = interval.saturating_sub(start.elapsed());
+        tokio::time::sleep(remaining).await;
+    }
+
+    {
+        let mut results = Vec::<String>::new();
+        for i in src.iter().rev() {
+            db.delete_postcard(&i.id).await?;
+            let result = db.get_postcard::<Test>(&i.id).await?;
+            if let Some(x) = result {
+                results.push(format!("{}(o)", x.id));
+            } else {
+                results.push(format!("{}(x)", i.id));
+            }
+        }
+        println!("[localdb] delete: {}", results.join(", "));
+        src.clear();
+    }
+
+    Ok(())
 }
