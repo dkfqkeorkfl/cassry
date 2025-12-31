@@ -2,6 +2,7 @@ use chrono::{DateTime, Duration, TimeZone, Utc};
 use serde::{Deserialize, Serialize};
 use std::fs;
 use std::path::Path;
+use std::sync::Arc;
 use tokio::sync::RwLock;
 
 use crate::anyhowln;
@@ -121,18 +122,18 @@ impl TimeWindowDBInner {
         Ok(())
     }
 
-    async fn put(&mut self, key: Vec<u8>, value: Vec<u8>) -> anyhow::Result<()> {
+    async fn put(&mut self, key: Arc<Vec<u8>>, value: Arc<Vec<u8>>) -> anyhow::Result<()> {
         if self.should_rotate() {
             self.rotate_db().await?;
         }
         self.current_db.put(key, value).await
     }
 
-    async fn get(&self, key: Vec<u8>) -> anyhow::Result<Option<Vec<u8>>> {
+    async fn get(&self, key: Arc<Vec<u8>>) -> anyhow::Result<Option<Vec<u8>>> {
         self.current_db.get(key).await
     }
 
-    async fn delete(&mut self, key: Vec<u8>) -> anyhow::Result<()> {
+    async fn delete(&mut self, key: Arc<Vec<u8>>) -> anyhow::Result<()> {
         if self.should_rotate() {
             self.rotate_db().await?;
         } else {
@@ -161,7 +162,7 @@ impl TimeWindowDBInner {
         if self.should_rotate() {
             self.rotate_db().await?;
         }
-        self.current_db.delete_json(key).await
+        self.current_db.delete_by_str(key).await
     }
 
     async fn flush(&self) -> anyhow::Result<()> {
@@ -183,17 +184,17 @@ impl TimeWindowDB {
         })
     }
 
-    pub async fn put(&self, key: Vec<u8>, value: Vec<u8>) -> anyhow::Result<()> {
+    pub async fn put(&self, key: Arc<Vec<u8>>, value: Arc<Vec<u8>>) -> anyhow::Result<()> {
         let mut inner = self.inner.write().await;
         inner.put(key, value).await
     }
 
-    pub async fn get(&self, key: Vec<u8>) -> anyhow::Result<Option<Vec<u8>>> {
+    pub async fn get(&self, key: Arc<Vec<u8>>) -> anyhow::Result<Option<Vec<u8>>> {
         let inner = self.inner.read().await;
         inner.get(key).await
     }
 
-    pub async fn delete(&self, key: Vec<u8>) -> anyhow::Result<()> {
+    pub async fn delete(&self, key: Arc<Vec<u8>>) -> anyhow::Result<()> {
         let mut inner = self.inner.write().await;
         inner.delete(key).await
     }

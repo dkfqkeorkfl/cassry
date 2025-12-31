@@ -1,154 +1,37 @@
 use chrono::{DateTime, Utc};
 use keyed_lock::r#async::KeyedLock;
-use rocksdb::{
-    BlockBasedOptions, Cache, DBCompressionType, DBWithThreadMode, IteratorMode, MultiThreaded,
-    Options, ReadOptions, WriteBatch as RocksWriteBatch, WriteOptions,
-};
+use rocksdb::{IteratorMode, WriteBatch as RocksWriteBatch};
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
+use std::sync::Arc;
 use std::usize;
-use std::{path::Path, sync::Arc};
 use tokio::task::{self, JoinHandle};
 
 use super::localdb::*;
 use super::serialization::{datetime_milliseconds, duration_milliseconds};
+
 /// TTL 인덱스 내부 블로킹 구현체
 ///
 /// 이 구조체는 TTL 인덱스를 관리하며, 실제 TTL DB가 아닙니다.
 /// RocksDB의 정렬 기능을 이용하여 expire_at(timestamp) → key 형태의 인덱스를 관리합니다.
 /// Iterator를 통해 앞에서부터 만료된 항목들을 순차적으로 스캔하여
 /// 키에 해당하는 데이터를 AccessDB에서 삭제하는 데 사용됩니다.
-struct TTLIndexInner {
-    db: DBWithThreadMode<MultiThreaded>,
-    write_opts: WriteOptions,
-    read_opts: ReadOptions,
+
+#[derive(Serialize, Deserialize)]
+struct IndexSer {
+    #[serde(with = "datetime_milliseconds")]
+    pub expire_at: DateTime<Utc>,
+    pub key: Arc<Vec<u8>>,
 }
 
-impl TTLIndexInner {
-    fn new(path: String) -> anyhow::Result<Self> {
-        let p = Path::new(&path);
+struct TTLIndex {
+    db: LocalDB,
+}
 
-        // TTL 인덱스용 최적화 설정: range scan + delete-heavy 워크로드
-        //
-        // 워크로드 특성:
-        // - 앞에서부터 순차적으로 만료된 항목들을 스캔 (Iterator 기반)
-        // - 작은 크기의 key-value (timestamp 8 bytes + key)
-        // - delete-heavy (만료된 항목들을 자주 삭제)
-        // - 정렬된 순회가 중요
-
-        let mut block_opts = BlockBasedOptions::default();
-        // Block cache 작게 설정 (range scan 위주이므로 큰 캐시가 불필요)
-        let cache = Cache::new_lru_cache(16 * 1024 * 1024); // 16MB
-        block_opts.set_block_cache(&cache);
-
-        // Bloom filter OFF (range scan 위주이므로 도움이 안 됨)
-        block_opts.set_bloom_filter(0.0, false);
-
-        // Index와 filter block을 캐시하지 않음 (메모리 절약)
-        block_opts.set_cache_index_and_filter_blocks(false);
-
-        // 데이터베이스 옵션 설정
-        let mut options = Options::default();
-        options.create_if_missing(true);
-        options.set_block_based_table_factory(&block_opts);
-
-        // 성능 최적화 설정
-        options.set_max_background_jobs(4);
-        options.set_bytes_per_sync(1024 * 1024); // 1MB
-
-        // Memtable 크기 작게 설정 (delete-heavy 워크로드, 작은 항목들)
-        options.set_write_buffer_size(16 * 1024 * 1024); // 16MB
-        options.set_max_write_buffer_number(2);
-        options.set_min_write_buffer_number_to_merge(1);
-
-        // Level size 설정 (작은 항목들이 많으므로 작게 설정)
-        options.set_max_bytes_for_level_base(64 * 1024 * 1024); // 64MB
-        options.set_target_file_size_base(16 * 1024 * 1024); // 16MB
-
-        // 압축 OFF (range scan 위주이므로 압축 해제 오버헤드 회피)
-        options.set_compression_type(DBCompressionType::None);
-        options.set_compression_per_level(&[
-            DBCompressionType::None,
-            DBCompressionType::None,
-            DBCompressionType::None,
-            DBCompressionType::None,
-            DBCompressionType::None,
-            DBCompressionType::None,
-            DBCompressionType::None,
-        ]);
-
-        // Direct I/O OFF (range scan 위주이므로 일반 I/O가 더 나음)
-        options.set_use_direct_reads(false);
-        options.set_use_direct_io_for_flush_and_compaction(false);
-        // Compaction readahead 설정 (delete-heavy 워크로드에서도 일부 readahead가 성능 향상)
-        options.set_compaction_readahead_size(2 * 1024 * 1024); // 2MB
-
-        // 파일 관리 설정
-        options.set_max_open_files(10000); // 파일 핸들 개수 제한 (메모리 절약)
-        options.set_keep_log_file_num(100); // WAL 로그 파일 개수 제한 (복구 시간 단축)
-        options.set_max_manifest_file_size(128 * 1024 * 1024); // 128MB
-
-        // 데이터 안정성 설정
-        options.set_paranoid_checks(true); // 체크섬 검증 활성화
-        options.set_manual_wal_flush(false); // 자동 WAL flush
-        options.set_atomic_flush(true); // 원자적 flush
-
-        // Write 옵션 설정
-        let mut write_opts = WriteOptions::default();
-        write_opts.disable_wal(false); // WAL 활성화 (데이터 안정성)
-        write_opts.set_sync(false); // 비동기 쓰기 (성능 우선)
-
-        // Read 옵션 설정
-        let mut read_opts = ReadOptions::default();
-        read_opts.set_verify_checksums(true); // 체크섬 검증
-        read_opts.set_async_io(false); // 동기 I/O (range scan에는 동기 I/O가 적합)
-        read_opts.set_readahead_size(0); // Iterator 기반 순차 스캔이므로 readahead 불필요
-
-        let db = DBWithThreadMode::<MultiThreaded>::open(&options, p)?;
-
-        Ok(TTLIndexInner {
-            db,
-            write_opts,
-            read_opts,
-        })
-    }
-
-    /// timestamp와 key를 조합하여 RocksDB key로 변환
-    ///
-    /// 형식: timestamp (8 bytes, big-endian) + key (variable length)
-    /// RocksDB의 정렬 순서를 이용하기 위해 timestamp를 big-endian으로 변환합니다.
-    /// 이렇게 하면 timestamp가 작은 값부터 큰 값 순으로 정렬되고,
-    /// 같은 timestamp의 경우 key 순으로 정렬됩니다.
-    fn timestamp_and_key_to_db_key(expire_at: &DateTime<Utc>, key: &[u8]) -> Vec<u8> {
-        let mut db_key = expire_at.timestamp_millis().to_be_bytes().to_vec();
-        db_key.extend_from_slice(key);
-        db_key
-    }
-
-    /// RocksDB key에서 timestamp를 추출
-    ///
-    /// 형식: timestamp (8 bytes, big-endian) + key (variable length)
-    fn db_key_to_timestamp(db_key: &[u8]) -> anyhow::Result<i64> {
-        if db_key.len() < 8 {
-            return Err(anyhow::anyhow!(
-                "Invalid key length: expected at least 8 bytes, got {}",
-                db_key.len()
-            ));
-        }
-        let mut bytes = [0u8; 8];
-        bytes.copy_from_slice(&db_key[..8]);
-        Ok(i64::from_be_bytes(bytes))
-    }
-
-    /// RocksDB key에서 원본 key를 추출
-    ///
-    /// 형식: timestamp (8 bytes, big-endian) + key (variable length)
-    fn db_key_to_key(db_key: &[u8]) -> Vec<u8> {
-        if db_key.len() <= 8 {
-            Vec::new()
-        } else {
-            db_key[8..].to_vec()
-        }
+impl TTLIndex {
+    async fn new(path: String) -> anyhow::Result<Self> {
+        let db = LocalDB::new(config::IndexTTL::new(path)).await?;
+        Ok(Self { db })
     }
 
     /// TTL 인덱스에 항목을 추가합니다.
@@ -164,12 +47,10 @@ impl TTLIndexInner {
     /// # RocksDB 저장 형식
     /// - **Key**: timestamp (8 bytes, big-endian) + key (variable length)
     /// - **Value**: 빈 값 (키 구별을 위한 용도만)
-    fn insert(&self, expire_at: DateTime<Utc>, key: &[u8]) -> anyhow::Result<()> {
-        let db_key = Self::timestamp_and_key_to_db_key(&expire_at, key);
-        // value는 빈 값으로 저장 (키 구별을 위한 용도)
-        self.db
-            .put_opt(&db_key, &[], &self.write_opts)
-            .map_err(anyhow::Error::from)
+    async fn insert(&self, expire_at: DateTime<Utc>, key: Arc<Vec<u8>>) -> anyhow::Result<()> {
+        let index_ser = IndexSer { expire_at, key };
+        let index_ser_bytes = postcard::to_stdvec(&index_ser)?;
+        self.db.put_raw(index_ser_bytes, Default::default()).await
     }
 
     /// TTL 인덱스에서 항목을 제거합니다.
@@ -180,15 +61,14 @@ impl TTLIndexInner {
     /// # Arguments
     /// * `expire_at` - 만료 시간 (삭제할 항목의 만료 시간)
     /// * `key` - AccessDB의 키
-    fn remove(&self, expire_at: DateTime<Utc>, key: &[u8]) -> anyhow::Result<()> {
-        let db_key = Self::timestamp_and_key_to_db_key(&expire_at, key);
-        self.remove_by_key(&db_key)
+    async fn remove(&self, expire_at: DateTime<Utc>, key: Arc<Vec<u8>>) -> anyhow::Result<()> {
+        let index_ser = IndexSer { expire_at, key };
+        let index_ser_bytes = postcard::to_stdvec(&index_ser)?;
+        self.db.delete_raw(index_ser_bytes).await
     }
 
-    fn remove_by_key(&self, combined_key: &[u8]) -> anyhow::Result<()> {
-        self.db
-            .delete_opt(combined_key, &self.write_opts)
-            .map_err(anyhow::Error::from)
+    async fn remove_by_key(&self, combined_key: Arc<Vec<u8>>) -> anyhow::Result<()> {
+        self.db.delete(combined_key).await
     }
 
     /// TTL 인덱스에서 항목이 존재하는지 확인합니다.
@@ -199,11 +79,8 @@ impl TTLIndexInner {
     /// # Returns
     /// * `Ok(true)` - 항목이 존재하는 경우
     /// * `Ok(false)` - 항목이 존재하지 않는 경우
-    fn includes(&self, combined_key: &[u8]) -> anyhow::Result<bool> {
-        match self.db.get_opt(&combined_key, &self.read_opts)? {
-            Some(_) => Ok(true),
-            None => Ok(false),
-        }
+    async fn includes(&self, combined_key: Arc<Vec<u8>>) -> anyhow::Result<bool> {
+        Ok(self.db.get(combined_key).await?.is_some())
     }
 
     /// WriteBatch를 커밋합니다.
@@ -215,10 +92,8 @@ impl TTLIndexInner {
     ///
     /// # Returns
     /// 커밋 성공 시 `Ok(())`, 실패 시 에러 반환
-    fn commit(&self, batch: WriteBatch) -> anyhow::Result<()> {
-        self.db
-            .write_opt(batch.into(), &self.write_opts)
-            .map_err(anyhow::Error::from)
+    async fn commit(&self, batch: WriteBatch) -> anyhow::Result<()> {
+        self.db.commit(batch.into()).await
     }
 
     /// 만료된 항목들을 스캔합니다.
@@ -232,38 +107,40 @@ impl TTLIndexInner {
     ///
     /// # Returns
     /// * `Ok(HashMap)` - 만료된 항목들의 맵 (RocksDB key → AccessDB key)
-    fn scan_expired(
+    async fn scan_expired(
         &self,
         now: DateTime<Utc>,
         limit: Option<usize>,
-    ) -> anyhow::Result<HashMap<Vec<u8>, Vec<u8>>> {
-        let limit = limit.unwrap_or(usize::MAX);
-        let now = now.timestamp_millis();
-
-        let mut results = HashMap::new();
-
+    ) -> anyhow::Result<HashMap<Arc<Vec<u8>>, IndexSer>> {
         // Iterator를 사용하여 앞에서부터 순차적으로 만료된 항목들을 스캔
         // timestamp가 정렬되어 있으므로 now_timestamp 이하인 항목들만 수집
-        let iter = self.db.iterator(IteratorMode::Start);
+        let limit = limit.unwrap_or(usize::MAX);
+        let ctx = (self.db.clone(), limit);
 
-        for item in iter {
-            let (db_key, _) = item?;
-            let timestamp = Self::db_key_to_timestamp(&db_key)?;
+        let results = tokio::task::spawn_blocking(move || {
+            let (db, limit) = ctx;
+            let mut results: HashMap<Arc<Vec<u8>>, IndexSer> = HashMap::new();
+            let iter = db.raw().iterator(IteratorMode::Start);
 
-            // now_timestamp 이하인 경우에만 추가
-            if timestamp <= now {
-                let key = Self::db_key_to_key(&db_key);
-                results.insert(db_key.into_vec(), key);
-            } else {
-                // timestamp가 정렬되어 있으므로 이후 항목은 모두 만료되지 않음
-                break;
+            for item in iter {
+                let (db_key, _) = item?;
+                let index_ser = postcard::from_bytes::<IndexSer>(&db_key)?;
+
+                // now_timestamp 이하인 경우에만 추가
+                if index_ser.expire_at <= now {
+                    results.insert(db_key.into_vec().into(), index_ser);
+                } else {
+                    // timestamp가 정렬되어 있으므로 이후 항목은 모두 만료되지 않음
+                    break;
+                }
+
+                if results.len() >= limit {
+                    break;
+                }
             }
-
-            if results.len() >= limit {
-                break;
-            }
-        }
-
+            anyhow::Ok(results)
+        })
+        .await??;
         Ok(results)
     }
 }
@@ -290,10 +167,11 @@ impl WriteBatch {
     /// # Arguments
     /// * `expire_at` - 만료 시간
     /// * `key` - AccessDB의 키
-    fn insert(&mut self, expire_at: &DateTime<Utc>, key: &[u8]) {
-        let db_key = TTLIndexInner::timestamp_and_key_to_db_key(expire_at, key);
-        // value는 빈 값으로 저장 (키 구별을 위한 용도)
-        self.batch.put(&db_key, &[]);
+    fn insert(&mut self, expire_at: DateTime<Utc>, key: Arc<Vec<u8>>) -> anyhow::Result<()> {
+        let index_ser = IndexSer { expire_at, key };
+        let index_ser_bytes = postcard::to_stdvec(&index_ser)?;
+        self.batch.put(&index_ser_bytes, &[]);
+        Ok(())
     }
 
     /// TTL 인덱스에서 항목을 제거합니다.
@@ -304,125 +182,17 @@ impl WriteBatch {
     /// # Arguments
     /// * `expire_at` - 만료 시간
     /// * `key` - AccessDB의 키
-    fn remove(&mut self, expire_at: &DateTime<Utc>, key: &[u8]) {
-        let db_key = TTLIndexInner::timestamp_and_key_to_db_key(expire_at, key);
-        self.batch.delete(&db_key);
+    fn remove(&mut self, expire_at: DateTime<Utc>, key: Arc<Vec<u8>>) -> anyhow::Result<()> {
+        let index_ser = IndexSer { expire_at, key };
+        let index_ser_bytes = postcard::to_stdvec(&index_ser)?;
+        self.batch.delete(&index_ser_bytes);
+        Ok(())
     }
 }
 
 impl Into<RocksWriteBatch> for WriteBatch {
     fn into(self) -> RocksWriteBatch {
         self.batch
-    }
-}
-
-/// TTL 인덱스를 관리하는 async 래퍼 클래스
-///
-/// 이 클래스는 TTL 인덱스를 관리하며, 실제 TTL DB가 아닙니다.
-/// RocksDB의 정렬 기능을 이용하여 expire_at(timestamp) → key 형태의 인덱스를 관리합니다.
-/// Iterator를 통해 앞에서부터 만료된 항목들을 순차적으로 스캔하여
-/// 키에 해당하는 데이터를 AccessDB에서 삭제하는 데 사용됩니다.
-#[derive(Clone)]
-struct TTLIndex {
-    inner: Arc<TTLIndexInner>,
-}
-
-impl TTLIndex {
-    /// 새로운 TTL 인덱스를 생성합니다.
-    ///
-    /// 지정된 경로에 RocksDB 인스턴스를 생성하고 TTL 인덱스를 초기화합니다.
-    /// 내부적으로 블로킹 작업이므로 async 컨텍스트에서 실행해야 합니다.
-    ///
-    /// # Arguments
-    /// * `path` - TTL 인덱스용 RocksDB 데이터베이스 경로
-    pub async fn new(path: String) -> anyhow::Result<Self> {
-        let inner = task::spawn_blocking(move || TTLIndexInner::new(path)).await??;
-
-        Ok(TTLIndex {
-            inner: Arc::new(inner),
-        })
-    }
-
-    /// TTL 인덱스에 항목을 추가합니다.
-    ///
-    /// 지정된 만료 시간과 키를 인덱스에 등록합니다.
-    /// 내부적으로 블로킹 태스크로 실행됩니다.
-    ///
-    /// # Arguments
-    /// * `expire_at` - 만료 시간
-    /// * `key` - AccessDB의 키
-    async fn insert(&self, expire_at: DateTime<Utc>, key: &[u8]) -> anyhow::Result<()> {
-        let inner = self.inner.clone();
-        let key = key.to_vec();
-        task::spawn_blocking(move || inner.insert(expire_at, &key)).await?
-    }
-
-    /// WriteBatch를 커밋합니다.
-    ///
-    /// 배치에 등록된 모든 작업을 원자적으로 수행합니다.
-    /// 내부적으로 블로킹 태스크로 실행됩니다.
-    ///
-    /// # Arguments
-    /// * `batch` - 커밋할 WriteBatch
-    async fn commit(&self, batch: WriteBatch) -> anyhow::Result<()> {
-        let inner = self.inner.clone();
-        task::spawn_blocking(move || inner.commit(batch)).await?
-    }
-
-    /// TTL 인덱스에서 항목이 존재하는지 확인합니다.
-    ///
-    /// 지정된 combined_key (RocksDB 키)가 인덱스에 존재하는지 확인합니다.
-    /// 내부적으로 블로킹 태스크로 실행됩니다.
-    ///
-    /// # Arguments
-    /// * `key` - RocksDB 키 (timestamp + AccessDB key 조합)
-    ///
-    /// # Returns
-    /// * `Ok(true)` - 항목이 존재하는 경우
-    /// * `Ok(false)` - 항목이 존재하지 않는 경우
-    async fn includes(&self, key: &[u8]) -> anyhow::Result<bool> {
-        let inner = self.inner.clone();
-        let key = key.to_vec();
-        task::spawn_blocking(move || inner.includes(&key)).await?
-    }
-
-    /// TTL 인덱스에서 항목을 제거합니다.
-    ///
-    /// 지정된 만료 시간과 키에 해당하는 인덱스 항목을 삭제합니다.
-    /// 내부적으로 블로킹 태스크로 실행됩니다.
-    ///
-    /// # Arguments
-    /// * `expire_at` - 만료 시간
-    /// * `key` - AccessDB의 키
-    async fn remove(&self, expire_at: DateTime<Utc>, key: &[u8]) -> anyhow::Result<()> {
-        let inner = self.inner.clone();
-        let key = key.to_vec();
-        task::spawn_blocking(move || inner.remove(expire_at, &key)).await?
-    }
-
-    async fn remove_by_key(&self, key: Vec<u8>) -> anyhow::Result<()> {
-        let inner = self.inner.clone();
-        task::spawn_blocking(move || inner.remove_by_key(&key)).await?
-    }
-
-    /// 만료된 항목들을 스캔합니다.
-    ///
-    /// RocksDB의 정렬 기능을 이용하여 앞에서부터 순차적으로 만료된 항목들을 스캔합니다.
-    /// 반환된 맵의 키는 RocksDB 키이고, 값은 AccessDB 키입니다.
-    /// 내부적으로 블로킹 태스크로 실행됩니다.
-    ///
-    /// # Arguments
-    /// * `now` - 현재 시간 (이 시간 이하의 expire_at을 가진 항목이 만료됨)
-    ///
-    /// # Returns
-    /// * `Ok(HashMap)` - 만료된 항목들의 맵 (RocksDB key → AccessDB key)
-    async fn scan_expired(
-        &self,
-        now: DateTime<Utc>,
-        limit: Option<usize>,
-    ) -> anyhow::Result<HashMap<Vec<u8>, Vec<u8>>> {
-        let inner = self.inner.clone();
-        task::spawn_blocking(move || inner.scan_expired(now, limit)).await?
     }
 }
 
@@ -474,7 +244,7 @@ impl ExpiredAt {
 /// * `value` - 실제 저장된 데이터 (바이너리)
 #[derive(Debug, Clone, Serialize, Deserialize)]
 struct DBSchema2025121601 {
-    pub ver: u32,
+    pub ver: u64,
     pub expired_at: ExpiredAt,
     #[serde(with = "datetime_milliseconds")]
     pub updated_at: DateTime<Utc>,
@@ -500,7 +270,7 @@ type DBSchema = DBSchema2025121601;
 struct Context {
     access_db: LocalDB,
     ttl_index: TTLIndex,
-    locks: KeyedLock<Vec<u8>>,
+    locks: KeyedLock<Arc<Vec<u8>>>,
 }
 
 /// TTL(Time To Live) 기능이 있는 로컬 데이터베이스
@@ -550,7 +320,7 @@ pub struct LocalDBTTL {
 
 impl LocalDBTTL {
     /// 데이터베이스 스키마 버전
-    pub const VERSION: u32 = 2025121601;
+    pub const VERSION: u64 = 2025121601;
 
     /// 새로운 LocalDBTTL 인스턴스를 생성합니다.
     ///
@@ -615,11 +385,11 @@ impl LocalDBTTL {
     /// * `ctx` - LocalDBTTL 컨텍스트
     async fn delete_expired(ctx: Arc<Context>, limit_scan: Option<usize>) -> anyhow::Result<()> {
         let expired = ctx.ttl_index.scan_expired(Utc::now(), limit_scan).await?;
-        for (index, key) in expired {
-            let _guard = ctx.locks.lock(key.clone()).await;
-            if ctx.ttl_index.includes(&index).await? {
-                ctx.access_db.delete(key).await?;
-                ctx.ttl_index.remove_by_key(index).await?;
+        for (key, index) in expired {
+            let _guard = ctx.locks.lock(index.key.clone()).await;
+            if ctx.ttl_index.includes(key.clone()).await? {
+                ctx.access_db.delete(index.key.clone()).await?;
+                ctx.ttl_index.remove_by_key(key).await?;
             }
         }
         Ok(())
@@ -639,11 +409,10 @@ impl LocalDBTTL {
     /// 저장 성공 시 `Ok(())`, 실패 시 에러 반환
     pub async fn put(
         &self,
-        key: Vec<u8>,
+        key: Arc<Vec<u8>>,
         value: Vec<u8>,
         expired_at: ExpiredAt,
     ) -> anyhow::Result<()> {
-        // AccessDBValue 생성
         let new_item = DBSchema {
             ver: Self::VERSION,
             expired_at: expired_at.clone(),
@@ -658,19 +427,19 @@ impl LocalDBTTL {
         if let Some(bytes) = self.ctx.access_db.get(key.clone()).await? {
             let old_item: DBSchema = postcard::from_bytes(&bytes)?;
             if old_item.expire_at() != new_item.expire_at() {
-                batch.remove(&old_item.expire_at(), &key);
-                batch.insert(&new_item.expire_at(), &key);
+                batch.remove(old_item.expire_at(), key.clone())?;
+                batch.insert(new_item.expire_at(), key.clone())?;
                 self.ctx.ttl_index.commit(batch).await?;
             }
         } else {
             self.ctx
                 .ttl_index
-                .insert(new_item.expire_at(), &key)
+                .insert(new_item.expire_at(), key.clone())
                 .await?;
         }
 
         // AccessDB에 저장
-        self.ctx.access_db.put(key, serialized).await?;
+        self.ctx.access_db.put(key, serialized.into()).await?;
 
         Ok(())
     }
@@ -688,7 +457,7 @@ impl LocalDBTTL {
     /// * `Ok(Some(value))` - 데이터가 존재하고 만료되지 않은 경우
     /// * `Ok(None)` - 데이터가 존재하지 않거나 만료된 경우
     /// * `Err(e)` - 조회 중 오류 발생
-    pub async fn get(&self, key: &Vec<u8>) -> anyhow::Result<Option<Vec<u8>>> {
+    pub async fn get(&self, key: Arc<Vec<u8>>) -> anyhow::Result<Option<Vec<u8>>> {
         let _guard = self.ctx.locks.lock(key.clone()).await;
         // AccessDB에서 조회
         let mut db_value = match self.ctx.access_db.get(key.clone()).await? {
@@ -712,12 +481,12 @@ impl LocalDBTTL {
                 db_value.updated_at = now;
                 self.ctx
                     .access_db
-                    .put(key.clone(), postcard::to_stdvec(&db_value)?)
+                    .put(key.clone(), postcard::to_stdvec(&db_value)?.into())
                     .await?;
                 if previous_expire_at != db_value.expire_at() {
                     let mut batch = WriteBatch::default();
-                    batch.remove(&previous_expire_at, &key);
-                    batch.insert(&db_value.expire_at(), &key);
+                    batch.remove(previous_expire_at, key.clone())?;
+                    batch.insert(db_value.expire_at(), key)?;
                     self.ctx.ttl_index.commit(batch).await?;
                 }
 
@@ -737,7 +506,7 @@ impl LocalDBTTL {
     ///
     /// # Returns
     /// 삭제 성공 시 `Ok(())`, 실패 시 에러 반환
-    pub async fn delete(&self, key: &Vec<u8>) -> anyhow::Result<()> {
+    pub async fn delete(&self, key: Arc<Vec<u8>>) -> anyhow::Result<()> {
         let _guard = self.ctx.locks.lock(key.clone()).await;
         // AccessDB에서 조회하여 expired_at 확인
         if let Some(serialized) = self.ctx.access_db.get(key.clone()).await? {
