@@ -25,13 +25,13 @@ struct IndexSer {
 }
 
 struct TTLIndex {
-    db: LocalDB,
+    db: Arc<LocalDB>,
 }
 
 impl TTLIndex {
     async fn new(path: String) -> anyhow::Result<Self> {
         let db = LocalDB::new(config::IndexTTL::new(path)).await?;
-        Ok(Self { db })
+        Ok(Self { db: db.into() })
     }
 
     /// TTL 인덱스에 항목을 추가합니다.

@@ -15,7 +15,6 @@ before-build = true
 [dependencies]
 # below are dependencies should be imported each project
 serde = { version = "1", features = ["derive", "rc"] }
-async-trait = "0.1"
 
 serde_json = "1"
 serde_urlencoded = "0.7"
