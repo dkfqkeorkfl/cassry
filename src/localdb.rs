@@ -1,3 +1,4 @@
+use chrono::{DateTime, Utc};
 use rocksdb::{
     BlockBasedOptions, Cache, DBCompressionType, DBWithThreadMode, MultiThreaded, Options,
     ReadOptions, WriteBatch, WriteOptions,
@@ -260,134 +261,11 @@ pub struct DBStats {
     pub pending_compaction_bytes: u64,
 }
 
-#[derive(Debug, Clone)]
-enum Operation {
-    Put { key: String, value: String },
-    Delete { key: String },
-}
-
 /// 내부 블로킹 구현체
 struct LocalDBInner {
     db: DBWithThreadMode<MultiThreaded>,
     write_opts: WriteOptions,
     read_opts: ReadOptions,
-}
-
-/// 트랜잭션을 위한 래퍼 구조체 (WriteBatch 기반)
-pub struct TransactionWrapper {
-    inner: Arc<LocalDBInner>,
-    pending_operations: Vec<Operation>,
-}
-
-impl TransactionWrapper {
-    /// 새로운 트랜잭션을 생성합니다.
-    pub(self) fn new(inner: Arc<LocalDBInner>) -> Self {
-        Self {
-            inner,
-            pending_operations: Vec::new(),
-        }
-    }
-
-    /// 트랜잭션 내에서 키-값 쌍을 저장합니다.
-    pub fn put(&mut self, key: String, value: String) -> anyhow::Result<()> {
-        self.pending_operations.push(Operation::Put { key, value });
-        Ok(())
-    }
-
-    /// 트랜잭션 내에서 JSON 객체를 저장합니다.
-    pub fn put_json<T>(&mut self, key: String, value: &T) -> anyhow::Result<()>
-    where
-        T: Serialize,
-    {
-        let json_str = serde_json::to_string(value)?;
-        self.pending_operations.push(Operation::Put {
-            key,
-            value: json_str,
-        });
-        Ok(())
-    }
-
-    /// 트랜잭션 내에서 키로 값을 조회합니다.
-    pub async fn get(&self, key: String) -> anyhow::Result<Option<String>> {
-        // 먼저 pending operations에서 찾기
-        for operation in &self.pending_operations {
-            match operation {
-                Operation::Put { key: op_key, value } => {
-                    if op_key == &key {
-                        return Ok(Some(value.clone()));
-                    }
-                }
-                Operation::Delete { key: op_key } => {
-                    if op_key == &key {
-                        return Ok(None);
-                    }
-                }
-            }
-        }
-
-        // pending operations에 없으면 데이터베이스에서 조회
-        let inner = self.inner.clone();
-        task::spawn_blocking(move || {
-            let result = inner.get(key.as_bytes()).and_then(|bytes| {
-                let result = if let Some(bytes) = bytes {
-                    Some(String::from_utf8(bytes)?)
-                } else {
-                    None
-                };
-                Ok(result)
-            })?;
-            Ok(result)
-        })
-        .await?
-    }
-
-    /// 트랜잭션 내에서 JSON 객체를 조회합니다.
-    pub async fn get_json<T>(&self, key: String) -> anyhow::Result<Option<T>>
-    where
-        T: for<'de> Deserialize<'de>,
-    {
-        match self.get(key).await? {
-            Some(json_str) => {
-                let value = serde_json::from_str(&json_str)?;
-                Ok(Some(value))
-            }
-            None => Ok(None),
-        }
-    }
-
-    /// 트랜잭션 내에서 키를 삭제합니다.
-    pub fn delete(&mut self, key: String) -> anyhow::Result<()> {
-        self.pending_operations.push(Operation::Delete { key });
-        Ok(())
-    }
-
-    /// 트랜잭션을 커밋합니다.
-    pub async fn commit(self) -> anyhow::Result<()> {
-        let mut batch = WriteBatch::default();
-
-        // pending operations를 순서대로 batch에 추가
-        for operation in self.pending_operations {
-            match operation {
-                Operation::Put { key, value } => {
-                    batch.put(key.as_bytes(), value.as_bytes());
-                }
-                Operation::Delete { key } => {
-                    batch.delete(key.as_bytes());
-                }
-            }
-        }
-
-        let inner = self.inner.clone();
-
-        // WriteBatch를 데이터베이스에 적용
-        task::spawn_blocking(move || {
-            inner
-                .db
-                .write_opt(batch, &inner.write_opts)
-                .map_err(anyhow::Error::from)
-        })
-        .await?
-    }
 }
 
 impl LocalDBInner {
@@ -524,6 +402,7 @@ impl LocalDBInner {
 
 pub struct LocalDB {
     inner: Arc<LocalDBInner>,
+    created_at: DateTime<Utc>,
 }
 
 impl LocalDB {
@@ -537,6 +416,7 @@ impl LocalDB {
                 write_opts,
                 read_opts,
             }),
+            created_at: Utc::now(),
         })
     }
 
@@ -723,45 +603,7 @@ impl LocalDB {
         task::spawn_blocking(move || inner.get_property(&name)).await?
     }
 
-    /// 새로운 트랜잭션을 시작합니다.
-    ///
-    /// # Returns
-    /// * `TransactionWrapper` - 트랜잭션 래퍼 객체
-    ///
-    /// # Example
-    /// ```rust
-    /// use cassry::leveldb::Leveldb;
-    /// use serde::{Serialize, Deserialize};
-    ///
-    /// #[derive(Serialize, Deserialize, Debug)]
-    /// struct User {
-    ///     id: u32,
-    ///     name: String,
-    ///     balance: f64,
-    /// }
-    ///
-    /// let db = Leveldb::new("test_db".to_string()).await?;
-    ///
-    /// // 트랜잭션 시작
-    /// let mut tx = db.transaction();
-    ///
-    /// // 트랜잭션 내에서 여러 작업 수행
-    /// let user1 = User { id: 1, name: "Alice".to_string(), balance: 100.0 };
-    /// let user2 = User { id: 2, name: "Bob".to_string(), balance: 200.0 };
-    ///
-    /// tx.put_json("user:1", &user1)?;
-    /// tx.put_json("user:2", &user2)?;
-    ///
-    /// // 기존 사용자 조회 및 업데이트
-    /// if let Some(mut existing_user) = tx.get_json::<User>("user:1").await? {
-    ///     existing_user.balance += 50.0;
-    ///     tx.put_json("user:1", &existing_user)?;
-    /// }
-    ///
-    /// // 트랜잭션 커밋
-    /// tx.commit().await?;
-    /// ```
-    pub fn transaction(&self) -> TransactionWrapper {
-        TransactionWrapper::new(self.inner.clone())
+    pub fn get_created_at(&self) -> &DateTime<Utc> {
+        &self.created_at
     }
 }

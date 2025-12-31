@@ -68,16 +68,19 @@ impl TimeWindowDBConfig {
 }
 
 /// TimeWindowDB의 내부 구현
-struct TimeWindowDBInner {
+pub struct TimeWindowDB {
     config: TimeWindowDBConfig,
-
-    current_db: LocalDB,
     created_at: chrono::DateTime<Utc>,
-    updated_at: chrono::DateTime<Utc>,
+
+    current_db: RwLock<LocalDB>,
 }
 
-impl TimeWindowDBInner {
-    async fn new(config: TimeWindowDBConfig) -> anyhow::Result<Self> {
+impl TimeWindowDB {
+    pub fn get_created_at(&self) -> &DateTime<Utc> {
+        &self.created_at
+    }
+
+    pub async fn new(config: TimeWindowDBConfig) -> anyhow::Result<Self> {
         let current_time = Utc::now();
 
         // Create base directory if it doesn't exist
@@ -89,28 +92,20 @@ impl TimeWindowDBInner {
         let current_db = config.get_localdb(&current_time).await?;
         Ok(Self {
             config,
-            current_db,
             created_at: current_time,
-            updated_at: current_time,
+            current_db: current_db.into(),
         })
     }
 
-    fn should_rotate(&self) -> bool {
-        (Utc::now() - self.updated_at) >= self.config.ttl
-    }
+    async fn try_rotate(&self) -> anyhow::Result<()> {
+        let current_time = Utc::now();
 
-    async fn rotate_db(&mut self) -> anyhow::Result<()> {
-        if !self.should_rotate() {
+        let mut current_db = self.current_db.write().await;
+        if current_time < *current_db.get_created_at() + self.config.ttl {
             return Ok(());
         }
 
-        let current_time = Utc::now();
-        let new_db = self.config.get_localdb(&current_time).await?;
-        self.updated_at = current_time;
-
-        let current_db_path = self.current_db.get_path().display().to_string();
-        self.current_db = new_db;
-        // Handle old DB
+        let current_db_path = current_db.get_path().display().to_string();
         if self.config.delete_legacy {
             if let Err(e) =
                 tokio::task::spawn_blocking(move || std::fs::remove_dir_all(current_db_path)).await
@@ -119,113 +114,137 @@ impl TimeWindowDBInner {
             }
         }
 
+        let new_db = self.config.get_localdb(&current_time).await?;
+        *current_db = new_db;
         Ok(())
-    }
-
-    async fn put(&mut self, key: Arc<Vec<u8>>, value: Arc<Vec<u8>>) -> anyhow::Result<()> {
-        if self.should_rotate() {
-            self.rotate_db().await?;
-        }
-        self.current_db.put(key, value).await
-    }
-
-    async fn get(&self, key: Arc<Vec<u8>>) -> anyhow::Result<Option<Vec<u8>>> {
-        self.current_db.get(key).await
-    }
-
-    async fn delete(&mut self, key: Arc<Vec<u8>>) -> anyhow::Result<()> {
-        if self.should_rotate() {
-            self.rotate_db().await?;
-        } else {
-            self.current_db.delete(key).await?;
-        }
-
-        Ok(())
-    }
-
-    async fn put_json<T: Serialize>(&mut self, key: String, value: &T) -> anyhow::Result<()> {
-        if self.should_rotate() {
-            self.rotate_db().await?;
-        }
-
-        self.current_db.put_json(key, value).await
-    }
-
-    async fn get_json<T>(&self, key: String) -> anyhow::Result<Option<T>>
-    where
-        T: for<'de> Deserialize<'de>,
-    {
-        self.current_db.get_json::<T>(key).await
-    }
-
-    async fn delete_json(&mut self, key: String) -> anyhow::Result<()> {
-        if self.should_rotate() {
-            self.rotate_db().await?;
-        }
-        self.current_db.delete_by_str(key).await
-    }
-
-    async fn flush(&self) -> anyhow::Result<()> {
-        self.current_db.flush().await?;
-        Ok(())
-    }
-}
-
-/// 스레드 안전한 TimeWindowDB 래퍼
-pub struct TimeWindowDB {
-    inner: RwLock<TimeWindowDBInner>,
-}
-
-impl TimeWindowDB {
-    pub async fn new(config: TimeWindowDBConfig) -> anyhow::Result<Self> {
-        let inner = TimeWindowDBInner::new(config).await?;
-        Ok(Self {
-            inner: inner.into(),
-        })
     }
 
     pub async fn put(&self, key: Arc<Vec<u8>>, value: Arc<Vec<u8>>) -> anyhow::Result<()> {
-        let mut inner = self.inner.write().await;
-        inner.put(key, value).await
+        self.try_rotate().await?;
+        self.current_db.read().await.put(key, value).await
     }
 
     pub async fn get(&self, key: Arc<Vec<u8>>) -> anyhow::Result<Option<Vec<u8>>> {
-        let inner = self.inner.read().await;
-        inner.get(key).await
+        self.try_rotate().await?;
+        self.current_db.read().await.get(key).await
     }
 
     pub async fn delete(&self, key: Arc<Vec<u8>>) -> anyhow::Result<()> {
-        let mut inner = self.inner.write().await;
-        inner.delete(key).await
+        self.try_rotate().await?;
+        self.current_db.read().await.delete(key).await
     }
 
-    pub async fn flush(&self) -> anyhow::Result<()> {
-        let inner = self.inner.read().await;
-        inner.flush().await
+    pub async fn put_raw(&self, key: Vec<u8>, value: Vec<u8>) -> anyhow::Result<()> {
+        self.try_rotate().await?;
+        self.current_db.read().await.put_raw(key, value).await
     }
 
-    pub async fn get_created_at(&self) -> chrono::DateTime<Utc> {
-        let inner = self.inner.read().await;
-        inner.created_at
+    pub async fn get_raw(&self, key: Vec<u8>) -> anyhow::Result<Option<Vec<u8>>> {
+        self.try_rotate().await?;
+        self.current_db.read().await.get_raw(key).await
     }
 
-    pub async fn get_updated_at(&self) -> chrono::DateTime<Utc> {
-        let inner = self.inner.read().await;
-        inner.updated_at
+    pub async fn delete_raw(&self, key: Vec<u8>) -> anyhow::Result<()> {
+        self.try_rotate().await?;
+        self.current_db.read().await.delete_raw(key).await
+    }
+    
+    pub async fn put_json(
+        &self,
+        key: &impl Serialize,
+        value: &impl Serialize,
+    ) -> anyhow::Result<()> {
+        let key_str = serde_json::to_string(key)?;
+        let json_str = serde_json::to_string(value)?;
+        self.put_raw(key_str.into_bytes(), json_str.into_bytes())
+            .await
     }
 
-    pub async fn put_json<T: Serialize>(&self, key: String, value: &T) -> anyhow::Result<()> {
-        self.inner.write().await.put_json(key, value).await
+    pub async fn delete_json(
+        &self,
+        key: &impl Serialize,
+    ) -> anyhow::Result<()> {
+        let key_str = serde_json::to_string(key)?;
+        self.delete_raw(key_str.into_bytes()).await
     }
 
-    pub async fn get_json<T>(&self, key: String) -> anyhow::Result<Option<T>>
+    pub async fn get_json<T>(&self, key: &impl Serialize) -> anyhow::Result<Option<T>>
     where
         T: for<'de> Deserialize<'de>,
     {
-        self.inner.read().await.get_json::<T>(key).await
+        let key_str = serde_json::to_string(key)?;
+        if let Some(data) = self.get_raw(key_str.into_bytes()).await.and_then(|ret| {
+            ret.map(|v| String::from_utf8(v).map_err(anyhow::Error::from))
+                .transpose()
+        })? {
+            let value: T = serde_json::from_str(&data)?;
+            Ok(Some(value))
+        } else {
+            Ok(None)
+        }
     }
 
-    pub async fn delete_json(&self, key: String) -> anyhow::Result<()> {
-        self.inner.write().await.delete_json(key).await
+    pub async fn put_bson(
+        &self,
+        key: &impl Serialize,
+        value: &impl Serialize,
+    ) -> anyhow::Result<()> {
+        let ks = bson::serialize_to_vec(key)?;
+        let bs = bson::serialize_to_vec(value)?;
+        self.put_raw(ks, bs).await
     }
+
+    pub async fn delete_bson(
+        &self,
+        key: &impl Serialize,
+    ) -> anyhow::Result<()> {
+        let ks = bson::serialize_to_vec(key)?;
+        self.delete_raw(ks).await
+    }
+
+    pub async fn get_bson<T>(&self, key: &impl Serialize) -> anyhow::Result<Option<T>>
+    where
+        T: for<'de> Deserialize<'de>,
+    {
+        let ks = bson::serialize_to_vec(key)?;
+        if let Some(data) = self.get_raw(ks).await? {
+            let value: T = bson::deserialize_from_slice(&data)?;
+            Ok(Some(value))
+        } else {
+            Ok(None)
+        }
+    }
+
+    pub async fn put_postcard(
+        &self,
+        key: &impl Serialize,
+        value: &impl Serialize,
+    ) -> anyhow::Result<()> {
+        let bs = postcard::to_stdvec(value)?;
+        let ks = postcard::to_stdvec(key)?;
+        self.put_raw(ks, bs).await
+    }
+
+    pub async fn delete_postcard(
+        &self,
+        key: &impl Serialize,
+    ) -> anyhow::Result<()> {
+        let ks = postcard::to_stdvec(key)?;
+        self.delete_raw(ks).await
+    }
+
+    pub async fn get_postcard<T>(&self, key: &impl Serialize) -> anyhow::Result<Option<T>>
+    where
+        T: for<'de> Deserialize<'de>,
+    {
+        let ks = postcard::to_stdvec(key)?;
+        if let Some(data) = self.get_raw(ks).await? {
+            let value: T = postcard::from_bytes(&data)?;
+            Ok(Some(value))
+        } else {
+            Ok(None)
+        }
+    }
+
+
 }
