@@ -644,10 +644,10 @@ impl LocalDBTTL {
 pub async fn test() -> anyhow::Result<()> {
     #[derive(Serialize, Deserialize, Debug)]
     struct Test {
-        id: u32,
+        id: usize,
     }
-    impl From<u32> for Test {
-        fn from(id: u32) -> Self {
+    impl From<usize> for Test {
+        fn from(id: usize) -> Self {
             Test { id }
         }
     }
@@ -662,7 +662,7 @@ pub async fn test() -> anyhow::Result<()> {
     let mut src = Vec::<Test>::new();
     while src.len() < 20 {
         let start = std::time::Instant::now();
-        src.push(Utc::now().second().into());
+        src.push(src.len().into());
         let item = src.last().unwrap();
         db.put_json(
             &item.id,
@@ -706,7 +706,7 @@ pub async fn test() -> anyhow::Result<()> {
 
     while src.len() < 20 {
         let start = std::time::Instant::now();
-        src.push(Utc::now().second().into());
+        src.push(src.len().into());
         let item = src.last().unwrap();
         db.put_bson(
             &item.id,
@@ -750,7 +750,7 @@ pub async fn test() -> anyhow::Result<()> {
 
     while src.len() < 20 {
         let start = std::time::Instant::now();
-        src.push(Utc::now().second().into());
+        src.push(src.len().into());
         let item = src.last().unwrap();
         db.put_postcard(
             &item.id,
@@ -793,23 +793,10 @@ pub async fn test() -> anyhow::Result<()> {
     }
 
 
-
-
-
-
-
-
-
-
-
-
-
-
-
     
     while src.len() < 20 {
         let start = std::time::Instant::now();
-        src.push(Utc::now().second().into());
+        src.push(src.len().into());
         let item = src.last().unwrap();
         db.put_json(
             &item.id,
@@ -819,7 +806,7 @@ pub async fn test() -> anyhow::Result<()> {
         .await?;
 
         let mut results = Vec::<String>::new();
-        for (i, item) in src.iter().rev().enumerate() {
+        for (i, item) in src.iter().enumerate() {
             if i % 2 == 0 {
                 continue;
             }
@@ -831,7 +818,7 @@ pub async fn test() -> anyhow::Result<()> {
                 results.push(format!("{}(x)", item.id));
             }
         }
-        println!("[ttldb] json: {}", results.join(", "));
+        println!("[ttldb] idle: {}", results.join(", "));
 
         let remaining = interval.saturating_sub(start.elapsed());
         tokio::time::sleep(remaining).await;
@@ -839,7 +826,7 @@ pub async fn test() -> anyhow::Result<()> {
 
     {
         let mut results = Vec::<String>::new();
-        for i in src.iter().rev() {
+        for i in src.iter() {
             let result = db.get_json::<Test>(&i.id).await?;
             if let Some(x) = result {
                 results.push(format!("{}(o)", x.id));
