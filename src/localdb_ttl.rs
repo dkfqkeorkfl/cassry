@@ -313,8 +313,6 @@ struct Context {
 /// ```
 pub struct LocalDBTTL {
     ctx: Arc<Context>,
-    path: String,
-    created_at: DateTime<Utc>,
     _task: JoinHandle<()>,
 }
 
@@ -370,8 +368,6 @@ impl LocalDBTTL {
 
         Ok(Self {
             ctx: context,
-            path,
-            created_at: Utc::now(),
             _task: task,
         })
     }
@@ -520,12 +516,123 @@ impl LocalDBTTL {
         Ok(())
     }
 
+    pub async fn put_raw(&self, key: Vec<u8>, value: Vec<u8>, expired_at: ExpiredAt) -> anyhow::Result<()> {
+        self.put(key.into(), value.into(), expired_at).await
+    }
+
+    pub async fn get_raw(&self, key: Vec<u8>) -> anyhow::Result<Option<Vec<u8>>> {
+        self.get(key.into()).await
+    }
+
+    pub async fn delete_raw(&self, key: Vec<u8>) -> anyhow::Result<()> {
+        self.delete(key.into()).await
+    }
+
+    pub async fn put_json(
+        &self,
+        key: &impl Serialize,
+        value: &impl Serialize,
+        expired_at: ExpiredAt,
+    ) -> anyhow::Result<()> {
+        let key_str = serde_json::to_string(key)?;
+        let json_str = serde_json::to_string(value)?;
+        self.put_raw(key_str.into_bytes(), json_str.into_bytes(), expired_at).await
+    }
+
+    pub async fn delete_json(
+        &self,
+        key: &impl Serialize,
+    ) -> anyhow::Result<()> {
+        let key_str = serde_json::to_string(key)?;
+        self.delete_raw(key_str.into_bytes()).await
+    }
+
+    pub async fn get_json<T>(&self, key: &impl Serialize) -> anyhow::Result<Option<T>>
+    where
+        T: for<'de> Deserialize<'de>,
+    {
+        let key_str = serde_json::to_string(key)?;
+        if let Some(data) = self.get_raw(key_str.into_bytes()).await.and_then(|ret| {
+            ret.map(|v| String::from_utf8(v).map_err(anyhow::Error::from))
+                .transpose()
+        })? {
+            let value: T = serde_json::from_str(&data)?;
+            Ok(Some(value))
+        } else {
+            Ok(None)
+        }
+    }
+
+    pub async fn put_bson(
+        &self,
+        key: &impl Serialize,
+        value: &impl Serialize,
+        expired_at: ExpiredAt,
+    ) -> anyhow::Result<()> {
+        let ks = bson::serialize_to_vec(key)?;
+        let bs = bson::serialize_to_vec(value)?;
+        self.put_raw(ks, bs, expired_at).await
+    }
+
+    pub async fn delete_bson(
+        &self,
+        key: &impl Serialize,
+    ) -> anyhow::Result<()> {
+        let ks = bson::serialize_to_vec(key)?;
+        self.delete_raw(ks).await
+    }
+
+    pub async fn get_bson<T>(&self, key: &impl Serialize) -> anyhow::Result<Option<T>>
+    where
+        T: for<'de> Deserialize<'de>,
+    {
+        let ks = bson::serialize_to_vec(key)?;
+        if let Some(data) = self.get_raw(ks).await? {
+            let value: T = bson::deserialize_from_slice(&data)?;
+            Ok(Some(value))
+        } else {
+            Ok(None)
+        }
+    }
+
+    pub async fn put_postcard(
+        &self,
+        key: &impl Serialize,
+        value: &impl Serialize,
+        expired_at: ExpiredAt,
+    ) -> anyhow::Result<()> {
+        let bs = postcard::to_stdvec(value)?;
+        let ks = postcard::to_stdvec(key)?;
+        self.put_raw(ks, bs, expired_at).await
+    }
+
+    pub async fn delete_postcard(
+        &self,
+        key: &impl Serialize,
+    ) -> anyhow::Result<()> {
+        let ks = postcard::to_stdvec(key)?;
+        self.delete_raw(ks).await
+    }
+
+    pub async fn get_postcard<T>(&self, key: &impl Serialize) -> anyhow::Result<Option<T>>
+    where
+        T: for<'de> Deserialize<'de>,
+    {
+        let ks = postcard::to_stdvec(key)?;
+        if let Some(data) = self.get_raw(ks).await? {
+            let value: T = postcard::from_bytes(&data)?;
+            Ok(Some(value))
+        } else {
+            Ok(None)
+        }
+    }
+
     /// 데이터베이스 기본 경로를 반환합니다.
     ///
     /// # Returns
     /// AccessDB가 저장된 경로 (TTL 인덱스는 `{path}/index`에 저장됨)
-    pub fn get_base_path(&self) -> &str {
-        &self.path
+    pub fn get_path(&self) -> &std::path::Path {
+        self.ctx.access_db.get_path()
     }
 
     /// LocalDBTTL 인스턴스가 생성된 시간을 반환합니다.
@@ -533,6 +640,6 @@ impl LocalDBTTL {
     /// # Returns
     /// 인스턴스 생성 시점의 UTC 시간
     pub fn get_created_at(&self) -> &DateTime<Utc> {
-        &self.created_at
+        &self.ctx.access_db.get_created_at()
     }
 }

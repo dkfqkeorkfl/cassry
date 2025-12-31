@@ -36,7 +36,7 @@ pub struct TimeWindowDBConfig {
 }
 
 impl TimeWindowDBConfig {
-    fn get_folder_name(&self, timestamp: &DateTime<Utc>) -> anyhow::Result<String> {
+    fn get_folder_name(&self, timestamp: &DateTime<Utc>) -> anyhow::Result<(String, DateTime<Utc>)> {
         const SECONDS_IN_DAY: i64 = 24 * 60 * 60; // 86400 seconds
         let ttl_seconds = self.ttl.num_seconds();
 
@@ -51,28 +51,33 @@ impl TimeWindowDBConfig {
         let folder_timestamp = (seconds / ttl_seconds) * ttl_seconds;
         let folder_time = Utc.timestamp_opt(folder_timestamp, 0).unwrap();
 
-        Ok(format!(
+        Ok((format!(
             "{}/{}",
             self.base_path,
             folder_time.format("%Y-%m-%d_%H-%M-%S")
-        ))
+        ), folder_time))
     }
 
-    async fn get_localdb(&self, timestamp: &DateTime<Utc>) -> anyhow::Result<LocalDB> {
-        let path = self.get_folder_name(timestamp)?;
-        match self.ty {
+    async fn get_localdb(&self, timestamp: &DateTime<Utc>) -> anyhow::Result<(LocalDB, DateTime<Utc>)> {
+        let (path, folder_time) = self.get_folder_name(timestamp)?;
+        let db = match self.ty {
             TimeWindowType::General => LocalDB::new(config::General::new(path)).await,
             TimeWindowType::Log => LocalDB::new(config::Log::new(path)).await,
-        }
+        }?;
+        Ok((db, folder_time))
     }
 }
 
+struct Context {
+    current_db: LocalDB,
+    folder_time: DateTime<Utc>,
+}
 /// TimeWindowDB의 내부 구현
 pub struct TimeWindowDB {
     config: TimeWindowDBConfig,
     created_at: chrono::DateTime<Utc>,
 
-    current_db: RwLock<LocalDB>,
+    ctx: RwLock<Context>,
 }
 
 impl TimeWindowDB {
@@ -89,64 +94,68 @@ impl TimeWindowDB {
             fs::create_dir_all(base_path_obj)?;
         }
 
-        let current_db = config.get_localdb(&current_time).await?;
+        let (current_db, folder_time) = config.get_localdb(&current_time).await?;
         Ok(Self {
             config,
             created_at: current_time,
-            current_db: current_db.into(),
+            ctx: RwLock::new(Context {
+                current_db,
+                folder_time,
+            }),
         })
     }
 
     async fn try_rotate(&self) -> anyhow::Result<()> {
         let current_time = Utc::now();
 
-        let mut current_db = self.current_db.write().await;
-        if current_time < *current_db.get_created_at() + self.config.ttl {
+        let mut ctx = self.ctx.write().await;
+        if current_time < ctx.folder_time + self.config.ttl {
             return Ok(());
         }
 
-        let current_db_path = current_db.get_path().display().to_string();
+        let privious_path = ctx.current_db.get_path().display().to_string();
+        let (new_db, new_folder_time) = self.config.get_localdb(&current_time).await?;
+        ctx.current_db = new_db;
+        ctx.folder_time = new_folder_time;
+
         if self.config.delete_legacy {
             if let Err(e) =
-                tokio::task::spawn_blocking(move || std::fs::remove_dir_all(current_db_path)).await
+                tokio::task::spawn_blocking(move || std::fs::remove_dir_all(privious_path)).await
             {
                 return Err(anyhow::anyhow!("error deleting old db: {}", e));
             }
         }
-
-        let new_db = self.config.get_localdb(&current_time).await?;
-        *current_db = new_db;
         Ok(())
     }
 
     pub async fn put(&self, key: Arc<Vec<u8>>, value: Arc<Vec<u8>>) -> anyhow::Result<()> {
         self.try_rotate().await?;
-        self.current_db.read().await.put(key, value).await
+        self.ctx.read().await.current_db.put(key, value).await
     }
 
     pub async fn get(&self, key: Arc<Vec<u8>>) -> anyhow::Result<Option<Vec<u8>>> {
         self.try_rotate().await?;
-        self.current_db.read().await.get(key).await
+        self.ctx.read().await.current_db.get(key).await
     }
 
     pub async fn delete(&self, key: Arc<Vec<u8>>) -> anyhow::Result<()> {
         self.try_rotate().await?;
-        self.current_db.read().await.delete(key).await
+        self.ctx.read().await.current_db.delete(key).await
     }
 
     pub async fn put_raw(&self, key: Vec<u8>, value: Vec<u8>) -> anyhow::Result<()> {
         self.try_rotate().await?;
-        self.current_db.read().await.put_raw(key, value).await
+        self.ctx.read().await.current_db.put_raw(key, value).await
     }
 
     pub async fn get_raw(&self, key: Vec<u8>) -> anyhow::Result<Option<Vec<u8>>> {
         self.try_rotate().await?;
-        self.current_db.read().await.get_raw(key).await
+        self.ctx.read().await.current_db.get_raw(key).await
     }
 
     pub async fn delete_raw(&self, key: Vec<u8>) -> anyhow::Result<()> {
         self.try_rotate().await?;
-        self.current_db.read().await.delete_raw(key).await
+        self.ctx.read().await.current_db.delete_raw(key).await
     }
     
     pub async fn put_json(
