@@ -1,4 +1,5 @@
-use chrono::{DateTime, Duration, TimeZone, Timelike, Utc};
+use chrono::{DateTime, Duration, Local, TimeZone, Timelike, Utc};
+use rocksdb::WriteBatch;
 use serde::{Deserialize, Serialize};
 use std::fs;
 use std::path::{Path, PathBuf};
@@ -38,8 +39,8 @@ pub struct TimeWindowDBConfig {
 impl TimeWindowDBConfig {
     fn get_folder_name(
         &self,
-        timestamp: &DateTime<Utc>,
-    ) -> anyhow::Result<(String, DateTime<Utc>)> {
+        timestamp: &DateTime<Local>,
+    ) -> anyhow::Result<(String, DateTime<Local>)> {
         const SECONDS_IN_DAY: i64 = 24 * 60 * 60; // 86400 seconds
         let ttl_seconds = self.ttl.num_seconds();
 
@@ -52,7 +53,7 @@ impl TimeWindowDBConfig {
 
         let seconds = timestamp.timestamp();
         let folder_timestamp = (seconds / ttl_seconds) * ttl_seconds;
-        let folder_time = Utc.timestamp_opt(folder_timestamp, 0).unwrap();
+        let folder_time = Local.timestamp_opt(folder_timestamp, 0).unwrap();
 
         Ok((
             format!(
@@ -66,8 +67,8 @@ impl TimeWindowDBConfig {
 
     async fn get_localdb(
         &self,
-        timestamp: &DateTime<Utc>,
-    ) -> anyhow::Result<(LocalDB, DateTime<Utc>)> {
+        timestamp: &DateTime<Local>,
+    ) -> anyhow::Result<(LocalDB, DateTime<Local>)> {
         let (path, folder_time) = self.get_folder_name(timestamp)?;
         let db = match self.ty {
             TimeWindowType::General => LocalDB::new(config::General::new(path)).await,
@@ -79,18 +80,18 @@ impl TimeWindowDBConfig {
 
 struct Context {
     current_db: LocalDB,
-    folder_time: DateTime<Utc>,
+    folder_time: DateTime<Local>,
 }
 /// TimeWindowDB의 내부 구현
 pub struct TimeWindowDB {
     config: TimeWindowDBConfig,
-    created_at: chrono::DateTime<Utc>,
+    created_at: chrono::DateTime<Local>,
 
     ctx: RwLock<Context>,
 }
 
 impl TimeWindowDB {
-    pub fn get_created_at(&self) -> &DateTime<Utc> {
+    pub fn get_created_at(&self) -> &DateTime<Local> {
         &self.created_at
     }
 
@@ -103,7 +104,7 @@ impl TimeWindowDB {
     }
 
     pub async fn new(config: TimeWindowDBConfig) -> anyhow::Result<Self> {
-        let current_time = Utc::now();
+        let current_time = Local::now();
 
         // Create base directory if it doesn't exist
         let base_path_obj = Path::new(&config.base_path);
@@ -123,7 +124,7 @@ impl TimeWindowDB {
     }
 
     async fn try_rotate(&self) -> anyhow::Result<()> {
-        let current_time = Utc::now();
+        let current_time = Local::now();
 
         let mut ctx = self.ctx.write().await;
         if current_time < ctx.folder_time + self.config.ttl {
@@ -143,6 +144,19 @@ impl TimeWindowDB {
             }
         }
         Ok(())
+    }
+
+    pub async fn commit(&self, batch: WriteBatch) -> anyhow::Result<()> {
+        self.try_rotate().await?;
+        self.ctx.read().await.current_db.commit(batch).await
+    }
+
+    pub async fn foreach<F>(&self, callback: F) -> anyhow::Result<()> 
+    where
+    F: Fn(&[u8], &[u8]) -> anyhow::Result<()> + Send + Sync + 'static + Clone,
+    {
+        self.try_rotate().await?;
+        self.ctx.read().await.current_db.foreach(callback).await
     }
 
     pub async fn put(&self, key: Arc<Vec<u8>>, value: Arc<Vec<u8>>) -> anyhow::Result<()> {

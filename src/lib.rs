@@ -20,6 +20,7 @@ pub use regex;
 pub use secrecy;
 pub use zeroize;
 pub use moka;
+pub use rocksdb;
 pub use blake3;
 pub use base64;
 

@@ -69,7 +69,7 @@ impl Inner {
         Ok(())
     }
 
-    pub async fn put(&mut self, lvl: log::Level, msg: String) {
+    pub async fn put(&mut self, _lvl: log::Level, _msg: String) {
         // let message = format!("[{}] - {}", Local::now().format("%Y-%m-%d %H:%M:%S"), msg);
         // self.messages.entry(lvl).or_insert(Vec::new()).push(message);
     }

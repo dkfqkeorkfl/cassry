@@ -1,7 +1,6 @@
 use chrono::{DateTime, Utc};
 use rocksdb::{
-    BlockBasedOptions, Cache, DBCompressionType, DBWithThreadMode, MultiThreaded, Options,
-    ReadOptions, WriteBatch, WriteOptions,
+    BlockBasedOptions, Cache, DBCompressionType, DBWithThreadMode, IteratorMode, MultiThreaded, Options, ReadOptions, WriteBatch, WriteOptions
 };
 use serde::{Deserialize, Serialize};
 use std::{path::Path, sync::Arc};
@@ -394,6 +393,19 @@ impl LocalDBInner {
     fn get_property(&self, name: &str) -> anyhow::Result<Option<String>> {
         self.db.property_value(name).map_err(anyhow::Error::from)
     }
+
+    pub fn foreach<F>(&self, callback: F) -> anyhow::Result<()> 
+    where
+    F: Fn(&[u8], &[u8]) -> anyhow::Result<()> + Send + Sync + 'static + Clone,
+    {
+
+        let iter = self.raw().iterator(IteratorMode::Start);
+        for item in iter {
+            let (key, value) = item?;
+            callback(&key, &value)?;
+        }
+        Ok(())
+    }
 }
 
 pub struct LocalDB {
@@ -419,6 +431,14 @@ impl LocalDB {
     pub async fn commit(&self, batch: WriteBatch) -> anyhow::Result<()> {
         let inner = self.inner.clone();
         task::spawn_blocking(move || inner.commit(batch)).await?
+    }
+
+    pub async fn foreach<F>(&self, callback: F) -> anyhow::Result<()> 
+    where
+    F: Fn(&[u8], &[u8]) -> anyhow::Result<()> + Send + Sync + 'static + Clone,
+    {
+        let inner = self.inner.clone();
+        task::spawn_blocking(move || inner.foreach(callback)).await?
     }
 
     pub async fn put(&self, key: Arc<Vec<u8>>, value: Arc<Vec<u8>>) -> anyhow::Result<()> {

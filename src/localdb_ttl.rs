@@ -83,7 +83,7 @@ impl TTLIndex {
         Ok(self.db.get(combined_key).await?.is_some())
     }
 
-    /// WriteBatch를 커밋합니다.
+    /// WriteBatch를 커밋합니다. 해당 커밋은 트랜잭션을 보장하지 않습니다.
     ///
     /// 배치에 등록된 모든 작업(insert, delete)을 원자적으로 수행합니다.
     ///
