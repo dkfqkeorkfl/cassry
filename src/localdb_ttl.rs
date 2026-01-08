@@ -629,9 +629,14 @@ pub async fn test() -> anyhow::Result<()> {
         }
     }
 
+    let cache_root = std::path::Path::new("/test");
+    if !cache_root.exists() {
+        tokio::fs::create_dir_all(cache_root).await?;
+    }
+
     let interval = std::time::Duration::from_secs(1);
     let db = LocalDBTTL::new(
-        "test_ttldb_live".to_string(),
+        "/test/localdb_ttl".to_string(),
         std::time::Duration::from_secs(1),
         None,
     )

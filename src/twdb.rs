@@ -1,7 +1,6 @@
 use chrono::{DateTime, Duration, Local, TimeZone, Timelike, Utc};
 use rocksdb::WriteBatch;
 use serde::{Deserialize, Serialize};
-use std::fs;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use tokio::sync::RwLock;
@@ -109,7 +108,7 @@ impl TimeWindowDB {
         // Create base directory if it doesn't exist
         let base_path_obj = Path::new(&config.base_path);
         if !base_path_obj.exists() {
-            fs::create_dir_all(base_path_obj)?;
+            tokio::fs::create_dir_all(base_path_obj).await?;
         }
 
         let (current_db, folder_time) = config.get_localdb(&current_time).await?;
@@ -261,9 +260,14 @@ pub async fn test() -> anyhow::Result<()> {
         }
     }
 
+    let cache_root = std::path::Path::new("/test");
+    if !cache_root.exists() {
+        tokio::fs::create_dir_all(cache_root).await?;
+    }
+
     let interval = std::time::Duration::from_secs(1);
     let test = TimeWindowDBConfig {
-        base_path: "test_twdb".to_string(),
+        base_path: "/test/twdb".to_string(),
         ttl: Duration::seconds(5),
         delete_legacy: true,
         ty: TimeWindowType::Log,

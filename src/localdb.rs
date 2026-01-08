@@ -1,6 +1,7 @@
 use chrono::{DateTime, Utc};
 use rocksdb::{
-    BlockBasedOptions, Cache, DBCompressionType, DBWithThreadMode, IteratorMode, MultiThreaded, Options, ReadOptions, WriteBatch, WriteOptions
+    BlockBasedOptions, Cache, DBCompressionType, DBWithThreadMode, IteratorMode, MultiThreaded,
+    Options, ReadOptions, WriteBatch, WriteOptions,
 };
 use serde::{Deserialize, Serialize};
 use std::{path::Path, sync::Arc};
@@ -394,11 +395,10 @@ impl LocalDBInner {
         self.db.property_value(name).map_err(anyhow::Error::from)
     }
 
-    pub fn foreach<F>(&self, callback: F) -> anyhow::Result<()> 
+    pub fn foreach<F>(&self, callback: F) -> anyhow::Result<()>
     where
-    F: Fn(&[u8], &[u8]) -> anyhow::Result<()> + Send + Sync + 'static + Clone,
+        F: Fn(&[u8], &[u8]) -> anyhow::Result<()> + Send + Sync + 'static + Clone,
     {
-
         let iter = self.raw().iterator(IteratorMode::Start);
         for item in iter {
             let (key, value) = item?;
@@ -433,9 +433,9 @@ impl LocalDB {
         task::spawn_blocking(move || inner.commit(batch)).await?
     }
 
-    pub async fn foreach<F>(&self, callback: F) -> anyhow::Result<()> 
+    pub async fn foreach<F>(&self, callback: F) -> anyhow::Result<()>
     where
-    F: Fn(&[u8], &[u8]) -> anyhow::Result<()> + Send + Sync + 'static + Clone,
+        F: Fn(&[u8], &[u8]) -> anyhow::Result<()> + Send + Sync + 'static + Clone,
     {
         let inner = self.inner.clone();
         task::spawn_blocking(move || inner.foreach(callback)).await?
@@ -587,8 +587,13 @@ pub async fn test() -> anyhow::Result<()> {
         }
     }
 
+    let cache_root = std::path::Path::new("/test");
+    if !cache_root.exists() {
+        tokio::fs::create_dir_all(cache_root).await?;
+    }
+
     let interval = std::time::Duration::from_secs(1);
-    let db = LocalDB::new(config::General::new("test_localdb".to_string())).await?;
+    let db = LocalDB::new(config::General::new("/test/localdb".to_string())).await?;
     let mut src = Vec::<Test>::new();
     while src.len() < 20 {
         let start = std::time::Instant::now();
