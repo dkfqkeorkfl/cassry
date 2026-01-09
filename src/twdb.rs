@@ -136,9 +136,7 @@ impl TimeWindowDB {
         ctx.folder_time = new_folder_time;
 
         if self.config.delete_legacy {
-            if let Err(e) =
-                tokio::task::spawn_blocking(move || std::fs::remove_dir_all(privious_path)).await
-            {
+            if let Err(e) = tokio::fs::remove_dir_all(privious_path).await {
                 return Err(anyhow::anyhow!("error deleting old db: {}", e));
             }
         }
@@ -150,9 +148,9 @@ impl TimeWindowDB {
         self.ctx.read().await.current_db.commit(batch).await
     }
 
-    pub async fn foreach<F>(&self, callback: F) -> anyhow::Result<()> 
+    pub async fn foreach<F>(&self, callback: F) -> anyhow::Result<()>
     where
-    F: Fn(&[u8], &[u8]) -> anyhow::Result<()> + Send + Sync + 'static + Clone,
+        F: Fn(&[u8], &[u8]) -> anyhow::Result<()> + Send + Sync + 'static + Clone,
     {
         self.try_rotate().await?;
         self.ctx.read().await.current_db.foreach(callback).await
