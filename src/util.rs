@@ -6,14 +6,29 @@ use ring::aead;
 use std::cmp::Ordering;
 use zeroize::Zeroize;
 
-pub fn get_epoch_first() -> DateTime<Utc> {
+pub fn datetime_epoch_first() -> DateTime<Utc> {
     Utc.timestamp_opt(0, 0).unwrap()
 }
 
 /// 밀리초 단위의 i64 값을 받아서 DateTime<Utc>로 변환
-pub fn make_datetime_from_millis(millis: i64) -> DateTime<Utc> {
+pub fn datetime_from_millis(millis: i64) -> DateTime<Utc> {
     // 밀리초 단위 Duration을 더해줌 (음수도 지원)
-    get_epoch_first() + Duration::milliseconds(millis)
+    datetime_epoch_first() + Duration::milliseconds(millis)
+}
+
+pub fn datetime_floor(
+    datetime: &DateTime<Utc>,
+    by: &Duration,
+) -> anyhow::Result<DateTime<Utc>> {
+    const SECONDS_IN_DAY: i64 = 24 * 60 * 60 * 1000; // 86400000 milliseconds
+    let dur_ms = by.num_milliseconds();
+    if dur_ms == 0 || SECONDS_IN_DAY % dur_ms != 0 {
+        return Err(anyhow::anyhow!("TTL must be a divisor of 86400 seconds (24 hours). Examples: 1s, 1m, 1h, 2h, 3h, 4h, 6h, 8h, 12h, 24h"));
+    }
+    let seconds = datetime.timestamp();
+    let floored_timestamp = (seconds / dur_ms) * dur_ms;
+    let floored_time = Utc.timestamp_opt(floored_timestamp, 0).unwrap();
+    Ok(floored_time)
 }
 
 pub fn verify_password(origin: &str, hashed: &str) -> anyhow::Result<()> {
@@ -39,27 +54,31 @@ pub fn hash_password(data: &str) -> anyhow::Result<String> {
 }
 
 /// 가변 길이 Blake3 기반 키드 해시 함수
-/// 
+///
 /// 1. 임의 길이의 키를 Blake3로 해시하여 32바이트 키를 생성합니다.
 /// 2. 그 키로 Blake3 keyed hash를 수행하여 지정된 길이의 해시를 생성합니다.
 /// `output_len`은 바이트 단위입니다 (1 이상, Blake3는 무제한 길이 지원).
-/// 
+///
 /// 참고: Blake3는 keyed hashing을 직접 지원하므로 HMAC과 유사한 보안성을 제공합니다.
 /// 키는 내부적으로 Blake3로 해시되어 32바이트로 변환되며, XOF(Extendable Output Function)를
 /// 사용하여 원하는 길이의 출력을 생성합니다.
-pub fn hmac_blake3_with_len(key: &[u8;32], message: &[u8], output_len: usize) -> anyhow::Result<Vec<u8>> {
+pub fn hmac_blake3_with_len(
+    key: &[u8; 32],
+    message: &[u8],
+    output_len: usize,
+) -> anyhow::Result<Vec<u8>> {
     if output_len == 0 {
         return Err(crate::anyhowln!("output_len must be greater than 0"));
     }
-    
+
     // 2단계: Blake3 keyed hash를 사용하여 메시지 해시
     let mut hasher = blake3::Hasher::new_keyed(key);
     hasher.update(message);
-    
+
     // 3단계: XOF(Extendable Output Function)를 사용하여 지정된 길이만큼 출력
     let mut output = vec![0u8; output_len];
     hasher.finalize_xof().fill(&mut output);
-    
+
     Ok(output)
 }
 

@@ -14,7 +14,7 @@ pub mod datetime_milliseconds {
         D: Deserializer<'de>,
     {
         let millis = i64::deserialize(deserializer)?;
-        Ok(crate::util::make_datetime_from_millis(millis))
+        Ok(crate::util::datetime_from_millis(millis))
     }
 }
 
