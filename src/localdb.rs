@@ -255,7 +255,7 @@ pub enum IteratorMode {
 }
 
 impl IteratorMode {
-    fn to_rocksdb_mode(&self) -> RocksIteratorMode {
+    fn to_rocksdb_mode<'a>(&'a self) -> RocksIteratorMode<'a> {
         match self {
             IteratorMode::Start => RocksIteratorMode::Start,
             IteratorMode::End => RocksIteratorMode::End,
@@ -460,15 +460,15 @@ impl LocalDBInner {
     ///
     /// # 용도
     /// 배치 임계값 체크 등 근사치로 충분한 경우에 사용하세요.
-    fn count(&self) -> anyhow::Result<u64> {
-        let count = self
-            .db
-            .property_value("rocksdb.estimate-num-keys")
-            .map_err(anyhow::Error::from)?
-            .and_then(|v| v.parse::<u64>().ok())
-            .unwrap_or(0);
-        Ok(count)
-    }
+    // fn count(&self) -> anyhow::Result<u64> {
+    //     let count = self
+    //         .db
+    //         .property_value("rocksdb.estimate-num-keys")
+    //         .map_err(anyhow::Error::from)?
+    //         .and_then(|v| v.parse::<u64>().ok())
+    //         .unwrap_or(0);
+    //     Ok(count)
+    // }
 
     /// 컴팩트 후 근사치를 반환합니다.
     /// `count()`보다 정확하지만 여전히 근사치입니다.
@@ -479,14 +479,14 @@ impl LocalDBInner {
     ///
     /// # 용도
     /// 더 정확한 근사치가 필요한 경우에 사용하세요.
-    fn count_with_compact(&self) -> anyhow::Result<u64> {
-        // 전체 범위 컴팩트 (None은 전체 범위를 의미)
-        // RocksDB의 compact_range는 Option<&[u8]> 타입을 받습니다
-        self.db.compact_range(None::<&[u8]>, None::<&[u8]>);
+    // fn count_with_compact(&self) -> anyhow::Result<u64> {
+    //     // 전체 범위 컴팩트 (None은 전체 범위를 의미)
+    //     // RocksDB의 compact_range는 Option<&[u8]> 타입을 받습니다
+    //     self.db.compact_range(None::<&[u8]>, None::<&[u8]>);
 
-        // 컴팩트 후 estimate 조회
-        self.count()
-    }
+    //     // 컴팩트 후 estimate 조회
+    //     self.count()
+    // }
 
     /// 내부 store가 비어있는지 확인합니다.
     /// Iterator에서 첫 번째 아이템을 확인하여 정확하게 판단합니다.

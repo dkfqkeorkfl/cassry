@@ -1,7 +1,7 @@
 use chrono::{DateTime, Duration, Local, TimeZone, Timelike, Utc};
 use rocksdb::WriteBatch;
 use serde::{Deserialize, Serialize};
-use std::path::{Path, PathBuf};
+use std::path::PathBuf;
 use std::sync::Arc;
 use tokio::sync::RwLock;
 
@@ -261,11 +261,6 @@ pub async fn test() -> anyhow::Result<()> {
         fn from(id: u32) -> Self {
             Test { id }
         }
-    }
-
-    let cache_root = std::path::Path::new("/test");
-    if !cache_root.exists() {
-        tokio::fs::create_dir_all(cache_root).await?;
     }
 
     let interval = std::time::Duration::from_secs(1);
