@@ -126,7 +126,7 @@ impl TimeWindowDB {
         })
     }
 
-    async fn try_rotate(&self) -> anyhow::Result<bool> {
+    pub async fn try_rotate(&self) -> anyhow::Result<bool> {
         let current_time = Local::now();
 
         let mut ctx = self.ctx.write().await;

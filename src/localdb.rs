@@ -746,8 +746,11 @@ impl LocalDBDrainer {
         };
 
         let result = db.take(iter, cnt).await?;
-        let commitor = Arc::new(DrainerCommit::new(db.clone(), result.last_key.clone()));
-        callback(result.items, commitor).await?;
+        if !result.items.is_empty() {
+            let commitor = Arc::new(DrainerCommit::new(db.clone(), result.last_key.clone()));
+            callback(result.items, commitor).await?;
+        }
+
         Ok(result.last_key)
     }
 }
