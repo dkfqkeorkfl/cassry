@@ -1,11 +1,12 @@
 use chrono::{DateTime, Utc};
 use rocksdb::{
-    BlockBasedOptions, Cache, DBCompressionType, DBWithThreadMode, IteratorMode, MultiThreaded,
-    Options, ReadOptions, WriteBatch, WriteOptions,
+    BlockBasedOptions, Cache, DBCompressionType, DBWithThreadMode, Direction,
+    IteratorMode as RocksIteratorMode, MultiThreaded, Options, ReadOptions, WriteBatch,
+    WriteOptions,
 };
 use serde::{Deserialize, Serialize};
 use std::{path::Path, sync::Arc};
-use tokio::task;
+use tokio::{sync::Mutex, task};
 
 pub mod config {
     use super::*;
@@ -247,6 +248,24 @@ pub mod config {
     }
 }
 
+pub enum IteratorMode {
+    Start,
+    End,
+    From(Vec<u8>, Direction),
+}
+
+impl IteratorMode {
+    fn to_rocksdb_mode(&self) -> RocksIteratorMode {
+        match self {
+            IteratorMode::Start => RocksIteratorMode::Start,
+            IteratorMode::End => RocksIteratorMode::End,
+            IteratorMode::From(key, direction) => {
+                RocksIteratorMode::From(key.as_slice(), *direction)
+            }
+        }
+    }
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct DBStats {
     pub total_entries: u64,
@@ -259,6 +278,11 @@ pub struct DBStats {
     pub write_amplification: u64,
     pub compression_ratio: f64,
     pub pending_compaction_bytes: u64,
+}
+
+pub struct TakeResult {
+    pub items: Vec<(Vec<u8>, Vec<u8>)>,
+    pub last_key: Option<Vec<u8>>,
 }
 
 /// 내부 블로킹 구현체
@@ -364,7 +388,7 @@ impl LocalDBInner {
 
         // 마지막 업데이트 시간 찾기
         let mut last_update = 0;
-        let mut iter = self.db.iterator(rocksdb::IteratorMode::End);
+        let mut iter = self.db.iterator(RocksIteratorMode::End);
         if let Some(Ok((_, value))) = iter.next() {
             if let Ok(value_str) = String::from_utf8(value.to_vec()) {
                 if let Ok(timestamp) = value_str.parse::<u64>() {
@@ -399,12 +423,83 @@ impl LocalDBInner {
     where
         F: Fn(&[u8], &[u8]) -> anyhow::Result<()> + Send + Sync + 'static + Clone,
     {
-        let iter = self.raw().iterator(IteratorMode::Start);
+        let iter = self.raw().iterator(RocksIteratorMode::Start);
         for item in iter {
             let (key, value) = item?;
             callback(&key, &value)?;
         }
         Ok(())
+    }
+
+    pub fn take(&self, iter: IteratorMode, cnt: usize) -> anyhow::Result<TakeResult> {
+        let mut result = Vec::new();
+        let mut last_key = None;
+        let iter = self.raw().iterator(iter.to_rocksdb_mode());
+        for item in iter.take(cnt + 1) {
+            let (key, value) = item?;
+            if result.len() < cnt {
+                result.push((key.to_vec(), value.to_vec()));
+            } else {
+                last_key = Some(key.to_vec());
+            }
+        }
+
+        Ok(TakeResult {
+            items: result,
+            last_key,
+        })
+    }
+
+    /// 내부 store의 총 아이템 개수를 반환합니다 (근사치).
+    /// RocksDB의 `rocksdb.estimate-num-keys` 속성을 사용합니다.
+    ///
+    /// # 성능
+    /// - 매우 빠름 (O(1))
+    /// - 근사치이므로 정확한 개수와 다를 수 있습니다
+    /// - 중복/삭제가 없는 경우 일반적으로 ±5% 이내의 정확도를 가집니다
+    ///
+    /// # 용도
+    /// 배치 임계값 체크 등 근사치로 충분한 경우에 사용하세요.
+    fn count(&self) -> anyhow::Result<u64> {
+        let count = self
+            .db
+            .property_value("rocksdb.estimate-num-keys")
+            .map_err(anyhow::Error::from)?
+            .and_then(|v| v.parse::<u64>().ok())
+            .unwrap_or(0);
+        Ok(count)
+    }
+
+    /// 컴팩트 후 근사치를 반환합니다.
+    /// `count()`보다 정확하지만 여전히 근사치입니다.
+    ///
+    /// # 성능
+    /// - 컴팩트 작업으로 인해 느릴 수 있습니다 (수 초 ~ 수십 초)
+    /// - 컴팩트 후 estimate가 더 정확해집니다 (일반적으로 ±1% 이내)
+    ///
+    /// # 용도
+    /// 더 정확한 근사치가 필요한 경우에 사용하세요.
+    fn count_with_compact(&self) -> anyhow::Result<u64> {
+        // 전체 범위 컴팩트 (None은 전체 범위를 의미)
+        // RocksDB의 compact_range는 Option<&[u8]> 타입을 받습니다
+        self.db.compact_range(None::<&[u8]>, None::<&[u8]>);
+
+        // 컴팩트 후 estimate 조회
+        self.count()
+    }
+
+    /// 내부 store가 비어있는지 확인합니다.
+    /// Iterator에서 첫 번째 아이템을 확인하여 정확하게 판단합니다.
+    ///
+    /// # 성능
+    /// - 빠름 (O(1), 첫 번째 아이템만 확인)
+    /// - `count()`보다 정확합니다 (estimate가 아닌 실제 확인)
+    ///
+    /// # 용도
+    /// 정확한 empty 체크가 필요한 경우에 사용하세요.
+    fn is_empty(&self) -> anyhow::Result<bool> {
+        let mut iter = self.db.iterator(RocksIteratorMode::Start);
+        Ok(iter.next().is_none())
     }
 }
 
@@ -428,6 +523,11 @@ impl LocalDB {
         })
     }
 
+    pub async fn is_empty(&self) -> anyhow::Result<bool> {
+        let inner = self.inner.clone();
+        task::spawn_blocking(move || inner.is_empty()).await?
+    }
+
     pub async fn commit(&self, batch: WriteBatch) -> anyhow::Result<()> {
         let inner = self.inner.clone();
         task::spawn_blocking(move || inner.commit(batch)).await?
@@ -439,6 +539,11 @@ impl LocalDB {
     {
         let inner = self.inner.clone();
         task::spawn_blocking(move || inner.foreach(callback)).await?
+    }
+
+    pub async fn take(&self, iter: IteratorMode, cnt: usize) -> anyhow::Result<TakeResult> {
+        let inner = self.inner.clone();
+        task::spawn_blocking(move || inner.take(iter, cnt)).await?
     }
 
     pub async fn put(&self, key: Arc<Vec<u8>>, value: Arc<Vec<u8>>) -> anyhow::Result<()> {
@@ -573,6 +678,77 @@ impl LocalDB {
 
     pub fn get_created_at(&self) -> &DateTime<Utc> {
         &self.created_at
+    }
+}
+
+pub struct DrainerCommit {
+    db: Arc<LocalDB>,
+    last_key: Option<Vec<u8>>,
+}
+
+impl DrainerCommit {
+    pub fn new(db: Arc<LocalDB>, last_key: Option<Vec<u8>>) -> Self {
+        Self { db, last_key }
+    }
+
+    pub async fn commit(&self) -> anyhow::Result<()> {
+        self.db
+            .put_raw(
+                Default::default(),
+                self.last_key.clone().unwrap_or_default(),
+            )
+            .await
+    }
+}
+
+pub struct LocalDBDrainer {
+    db: Mutex<Arc<LocalDB>>,
+}
+
+impl LocalDBDrainer {
+    pub fn open(db: LocalDB) -> Self {
+        Self {
+            db: Mutex::new(Arc::new(db)),
+        }
+    }
+
+    pub async fn set_offset(&self, offset: Option<Vec<u8>>) -> anyhow::Result<()> {
+        self.db
+            .lock()
+            .await
+            .put_raw(Default::default(), offset.unwrap_or_default())
+            .await
+    }
+
+    pub async fn get_offset(&self) -> anyhow::Result<Option<Vec<u8>>> {
+        self.db.lock().await.get_raw(Default::default()).await
+    }
+
+    pub async fn reset(&self) -> anyhow::Result<()> {
+        self.db.lock().await.delete_raw(Default::default()).await
+    }
+
+    pub async fn consume<F, Fut>(&self, cnt: usize, callback: F) -> anyhow::Result<Option<Vec<u8>>>
+    where
+        F: FnOnce(Vec<(Vec<u8>, Vec<u8>)>, Arc<DrainerCommit>) -> Fut + Send + Sync + 'static,
+        Fut: std::future::Future<Output = anyhow::Result<()>> + Send + 'static,
+    {
+        let db = self.db.lock().await;
+        let offset = db.get_raw(Default::default()).await?;
+        let iter = if let Some(offset) = offset {
+            if offset.is_empty() {
+                return Ok(None);
+            } else {
+                IteratorMode::From(offset, Direction::Forward)
+            }
+        } else {
+            IteratorMode::Start
+        };
+
+        let result = db.take(iter, cnt).await?;
+        let commitor = Arc::new(DrainerCommit::new(db.clone(), result.last_key.clone()));
+        callback(result.items, commitor).await?;
+        Ok(result.last_key)
     }
 }
 

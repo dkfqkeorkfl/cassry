@@ -1,4 +1,4 @@
-use std::sync::Arc;
+use std::{ops::{Add, Div, Mul, Sub}, sync::Arc};
 
 use serde::{Deserialize, Serialize};
 use tokio::sync::RwLock;
@@ -28,3 +28,12 @@ pub trait ErrCode {
     fn as_response(&self) -> (u16, serde_json::Value);
 }
 
+pub trait Arithmetic:
+    Add<Output = Self> + Sub<Output = Self> + Mul<Output = Self> + Div<Output = Self> + Copy
+{
+}
+
+impl<T> Arithmetic for T where
+    T: Add<Output = T> + Sub<Output = T> + Mul<Output = T> + Div<Output = T> + Copy
+{
+}

@@ -27,6 +27,15 @@ pub enum TimeWindowType {
     Log,
 }
 
+impl TimeWindowType {
+    pub async fn make_db(&self, path: &str) -> anyhow::Result<LocalDB> {
+        match self {
+            TimeWindowType::General => LocalDB::new(config::General::new(path.to_string())).await,
+            TimeWindowType::Log => LocalDB::new(config::Log::new(path.to_string())).await,
+        }
+    }
+}
+
 #[derive(Clone)]
 pub struct TimeWindowDBConfig {
     pub base_path: String,
@@ -69,10 +78,7 @@ impl TimeWindowDBConfig {
         timestamp: &DateTime<Local>,
     ) -> anyhow::Result<(LocalDB, DateTime<Local>)> {
         let (path, folder_time) = self.get_folder_name(timestamp)?;
-        let db = match self.ty {
-            TimeWindowType::General => LocalDB::new(config::General::new(path)).await,
-            TimeWindowType::Log => LocalDB::new(config::Log::new(path)).await,
-        }?;
+        let db = self.ty.make_db(&path).await?;
         Ok((db, folder_time))
     }
 }
@@ -102,14 +108,12 @@ impl TimeWindowDB {
         self.ctx.read().await.current_db.get_path().to_path_buf()
     }
 
+    pub async fn get_current_dt(&self) -> DateTime<Local> {
+        self.ctx.read().await.folder_time.clone()
+    }
+
     pub async fn new(config: TimeWindowDBConfig) -> anyhow::Result<Self> {
         let current_time = Local::now();
-
-        // Create base directory if it doesn't exist
-        let base_path_obj = Path::new(&config.base_path);
-        if !base_path_obj.exists() {
-            tokio::fs::create_dir_all(base_path_obj).await?;
-        }
 
         let (current_db, folder_time) = config.get_localdb(&current_time).await?;
         Ok(Self {
@@ -122,25 +126,26 @@ impl TimeWindowDB {
         })
     }
 
-    async fn try_rotate(&self) -> anyhow::Result<()> {
+    async fn try_rotate(&self) -> anyhow::Result<bool> {
         let current_time = Local::now();
 
         let mut ctx = self.ctx.write().await;
         if current_time < ctx.folder_time + self.config.ttl {
-            return Ok(());
+            return Ok(false);
         }
 
-        let privious_path = ctx.current_db.get_path().display().to_string();
+        let previous_is_empty = ctx.current_db.is_empty().await?;
+        let previous_path = ctx.current_db.get_path().display().to_string();
         let (new_db, new_folder_time) = self.config.get_localdb(&current_time).await?;
         ctx.current_db = new_db;
         ctx.folder_time = new_folder_time;
 
-        if self.config.delete_legacy {
-            if let Err(e) = tokio::fs::remove_dir_all(privious_path).await {
+        if self.config.delete_legacy || previous_is_empty {
+            if let Err(e) = tokio::fs::remove_dir_all(previous_path).await {
                 return Err(anyhow::anyhow!("error deleting old db: {}", e));
             }
         }
-        Ok(())
+        Ok(true)
     }
 
     pub async fn commit(&self, batch: WriteBatch) -> anyhow::Result<()> {
