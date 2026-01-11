@@ -49,19 +49,27 @@ impl TimeWindowDBConfig {
         &self,
         timestamp: &DateTime<Local>,
     ) -> anyhow::Result<(String, DateTime<Local>)> {
-        const SECONDS_IN_DAY: i64 = 24 * 60 * 60; // 86400 seconds
+        const SECONDS_IN_DAY: i64 = 24 * 60 * 60;
         let ttl_seconds = self.ttl.num_seconds();
 
-        // 86400초의 약수인지 확인
         if ttl_seconds == 0 || SECONDS_IN_DAY % ttl_seconds != 0 {
             return Err(anyhowln!(
                 "TTL must be a divisor of 86400 seconds (24 hours). Examples: 1s, 1m, 1h, 2h, 3h, 4h, 6h, 8h, 12h, 24h"
             ));
         }
 
-        let seconds = timestamp.timestamp();
-        let folder_timestamp = (seconds / ttl_seconds) * ttl_seconds;
-        let folder_time = Local.timestamp_opt(folder_timestamp, 0).unwrap();
+        // Local 날짜의 자정을 기준으로 계산
+        let midnight = timestamp
+            .date_naive()
+            .and_hms_opt(0, 0, 0)
+            .unwrap()
+            .and_local_timezone(Local)
+            .unwrap();
+
+        let elapsed = timestamp.signed_duration_since(midnight);
+        let folder_elapsed = Duration::seconds((elapsed.num_seconds() / ttl_seconds) * ttl_seconds);
+
+        let folder_time = midnight + folder_elapsed;
 
         Ok((
             format!(
