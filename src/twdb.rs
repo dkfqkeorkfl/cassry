@@ -1,4 +1,4 @@
-use chrono::{DateTime, Duration, Local, TimeZone, Timelike, Utc};
+use chrono::{DateTime, Duration, Local, Timelike, Utc};
 use rocksdb::WriteBatch;
 use serde::{Deserialize, Serialize};
 use std::path::PathBuf;
@@ -75,7 +75,7 @@ impl TimeWindowDBConfig {
             format!(
                 "{}/{}",
                 self.base_path,
-                folder_time.format("%Y-%m-%d_%H-%M-%S")
+                folder_time.format("%Y%m%d-%H%M%S")
             ),
             folder_time,
         ))
