@@ -9,12 +9,293 @@ use std::{path::Path, sync::Arc};
 use tokio::{sync::Mutex, task};
 
 pub mod config {
+    use std::path::PathBuf;
+
     use super::*;
 
     pub trait Generator {
         fn generate(
             &self,
         ) -> anyhow::Result<(DBWithThreadMode<MultiThreaded>, WriteOptions, ReadOptions)>;
+    }
+
+    /// RocksDB 압축 타입 (직렬화 가능)
+    #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+    #[serde(rename_all = "lowercase")]
+    pub enum CompressionType {
+        None,
+        Snappy,
+        Zlib,
+        Bz2,
+        Lz4,
+        Lz4hc,
+        Zstd,
+        #[serde(other)]
+        Unknown,
+    }
+
+    impl From<CompressionType> for DBCompressionType {
+        fn from(ct: CompressionType) -> Self {
+            match ct {
+                CompressionType::None => DBCompressionType::None,
+                CompressionType::Snappy => DBCompressionType::Snappy,
+                CompressionType::Zlib => DBCompressionType::Zlib,
+                CompressionType::Bz2 => DBCompressionType::Bz2,
+                CompressionType::Lz4 => DBCompressionType::Lz4,
+                CompressionType::Lz4hc => DBCompressionType::Lz4hc,
+                CompressionType::Zstd => DBCompressionType::Zstd,
+                CompressionType::Unknown => DBCompressionType::None,
+            }
+        }
+    }
+
+    /// BlockBasedOptions 설정
+    #[derive(Debug, Clone, Serialize, Deserialize, Default)]
+    pub struct BlockBasedConfig {
+        /// 블록 캐시 크기 (바이트)
+        pub cache_size: Option<usize>,
+
+        /// Bloom filter bits per key
+        pub bloom_filter_bits_per_key: Option<f64>,
+
+        /// Index 및 filter block을 캐시할지 여부
+        pub cache_index_and_filter_blocks: Option<bool>,
+
+        /// L0 filter 및 index block을 캐시에 고정할지 여부
+        pub pin_l0_filter_and_index_blocks_in_cache: Option<bool>,
+    }
+
+    impl BlockBasedConfig {
+        /// BlockBasedOptions를 빌드합니다.
+        pub fn build(&self) -> BlockBasedOptions {
+            let mut block_opts = BlockBasedOptions::default();
+            if let Some(cache_size) = self.cache_size {
+                let cache = Cache::new_lru_cache(cache_size);
+                block_opts.set_block_cache(&cache);
+            }
+
+            if let Some(bits) = self.bloom_filter_bits_per_key {
+                block_opts.set_bloom_filter(bits, false);
+            }
+            if let Some(cache_index) = self.cache_index_and_filter_blocks {
+                block_opts.set_cache_index_and_filter_blocks(cache_index);
+            }
+            if let Some(pin_l0) = self.pin_l0_filter_and_index_blocks_in_cache {
+                block_opts.set_pin_l0_filter_and_index_blocks_in_cache(pin_l0);
+            }
+            block_opts
+        }
+    }
+
+    /// WriteOptions 설정
+    #[derive(Debug, Clone, Serialize, Deserialize, Default)]
+    pub struct WriteOptionsConfig {
+        /// WAL 비활성화 여부
+        pub disable_wal: Option<bool>,
+
+        /// 동기 쓰기 여부
+        pub sync: Option<bool>,
+    }
+
+    impl WriteOptionsConfig {
+        /// WriteOptions를 빌드합니다.
+        pub fn build(&self) -> WriteOptions {
+            let mut write_opts = WriteOptions::default();
+            if let Some(disable_wal) = self.disable_wal {
+                write_opts.disable_wal(disable_wal);
+            }
+            if let Some(sync) = self.sync {
+                write_opts.set_sync(sync);
+            }
+            write_opts
+        }
+    }
+
+    /// ReadOptions 설정
+    #[derive(Debug, Clone, Serialize, Deserialize, Default)]
+    pub struct ReadOptionsConfig {
+        /// 체크섬 검증 여부
+        pub verify_checksums: Option<bool>,
+
+        /// 비동기 I/O 사용 여부
+        pub async_io: Option<bool>,
+
+        /// Readahead 크기 (바이트)
+        pub readahead_size: Option<u64>,
+    }
+
+    impl ReadOptionsConfig {
+        /// ReadOptions를 빌드합니다.
+        pub fn build(&self) -> ReadOptions {
+            let mut read_opts = ReadOptions::default();
+            if let Some(verify_checksums) = self.verify_checksums {
+                read_opts.set_verify_checksums(verify_checksums);
+            }
+            if let Some(async_io) = self.async_io {
+                read_opts.set_async_io(async_io);
+            }
+            if let Some(readahead_size) = self.readahead_size {
+                read_opts.set_readahead_size(readahead_size as usize);
+            }
+            read_opts
+        }
+    }
+
+    /// RocksDB 전체 설정 구조체
+    #[derive(Debug, Clone, Serialize, Deserialize, Default)]
+    pub struct DBConfig {
+        /// BlockBasedOptions 설정
+        pub block_based: Option<BlockBasedConfig>,
+
+        /// 최대 백그라운드 작업 수
+        pub max_background_jobs: Option<i32>,
+
+        /// Sync당 바이트 수
+        pub bytes_per_sync: Option<u64>,
+
+        /// Write buffer 크기 (바이트)
+        pub write_buffer_size: Option<u64>,
+
+        /// 최대 write buffer 개수
+        pub max_write_buffer_number: Option<i32>,
+
+        /// Merge에 필요한 최소 write buffer 개수
+        pub min_write_buffer_number_to_merge: Option<i32>,
+
+        /// Level 0 기준 최대 바이트 수
+        pub max_bytes_for_level_base: Option<u64>,
+
+        /// 파일 크기 기준 (바이트)
+        pub target_file_size_base: Option<u64>,
+
+        /// 기본 압축 타입
+        pub compression_type: Option<CompressionType>,
+
+        /// 레벨별 압축 타입
+        pub compression_per_level: Option<Vec<CompressionType>>,
+
+        /// Direct reads 사용 여부
+        pub use_direct_reads: Option<bool>,
+
+        /// Flush 및 compaction에 Direct I/O 사용 여부
+        pub use_direct_io_for_flush_and_compaction: Option<bool>,
+
+        /// Compaction readahead 크기 (바이트)
+        pub compaction_readahead_size: Option<u64>,
+
+        /// 최대 열린 파일 개수 (-1은 무제한)
+        pub max_open_files: Option<i32>,
+
+        /// 유지할 로그 파일 개수
+        pub keep_log_file_num: Option<usize>,
+
+        /// Manifest 파일 최대 크기 (바이트)
+        pub max_manifest_file_size: Option<u64>,
+
+        /// Paranoid checks 활성화 여부
+        pub paranoid_checks: Option<bool>,
+
+        /// 수동 WAL flush 여부
+        pub manual_wal_flush: Option<bool>,
+
+        /// 원자적 flush 활성화 여부
+        pub atomic_flush: Option<bool>,
+
+        /// WriteOptions 설정
+        pub write_options: Option<WriteOptionsConfig>,
+
+        /// ReadOptions 설정
+        pub read_options: Option<ReadOptionsConfig>,
+    }
+
+    impl DBConfig {
+        /// Options를 빌드합니다.
+        pub fn build_db_opt(&self) -> anyhow::Result<Options> {
+            let mut options = Options::default();
+            if let Some(block_based) = &self.block_based {
+                let block_opts = block_based.build();
+                options.set_block_based_table_factory(&block_opts);
+            }
+
+            if let Some(max_background_jobs) = self.max_background_jobs {
+                options.set_max_background_jobs(max_background_jobs);
+            }
+            if let Some(bytes_per_sync) = self.bytes_per_sync {
+                options.set_bytes_per_sync(bytes_per_sync);
+            }
+            if let Some(write_buffer_size) = self.write_buffer_size {
+                options.set_write_buffer_size(write_buffer_size as usize);
+            }
+            if let Some(max_write_buffer_number) = self.max_write_buffer_number {
+                options.set_max_write_buffer_number(max_write_buffer_number);
+            }
+            if let Some(min_write_buffer_number_to_merge) = self.min_write_buffer_number_to_merge {
+                options.set_min_write_buffer_number_to_merge(min_write_buffer_number_to_merge);
+            }
+            if let Some(max_bytes_for_level_base) = self.max_bytes_for_level_base {
+                options.set_max_bytes_for_level_base(max_bytes_for_level_base);
+            }
+            if let Some(target_file_size_base) = self.target_file_size_base {
+                options.set_target_file_size_base(target_file_size_base);
+            }
+
+            if let Some(compression_type) = self.compression_type {
+                options.set_compression_type(compression_type.into());
+            }
+            if let Some(ref compression_per_level) = self.compression_per_level {
+                let compression_levels: Vec<DBCompressionType> =
+                    compression_per_level.iter().map(|&ct| ct.into()).collect();
+                options.set_compression_per_level(&compression_levels);
+            }
+
+            if let Some(use_direct_reads) = self.use_direct_reads {
+                options.set_use_direct_reads(use_direct_reads);
+            }
+            if let Some(use_direct_io) = self.use_direct_io_for_flush_and_compaction {
+                options.set_use_direct_io_for_flush_and_compaction(use_direct_io);
+            }
+            if let Some(compaction_readahead_size) = self.compaction_readahead_size {
+                options.set_compaction_readahead_size(compaction_readahead_size as usize);
+            }
+
+            if let Some(max_open_files) = self.max_open_files {
+                options.set_max_open_files(max_open_files);
+            }
+            if let Some(keep_log_file_num) = self.keep_log_file_num {
+                options.set_keep_log_file_num(keep_log_file_num);
+            }
+            if let Some(max_manifest_file_size) = self.max_manifest_file_size {
+                options.set_max_manifest_file_size(max_manifest_file_size as usize);
+            }
+
+            if let Some(paranoid_checks) = self.paranoid_checks {
+                options.set_paranoid_checks(paranoid_checks);
+            }
+            if let Some(manual_wal_flush) = self.manual_wal_flush {
+                options.set_manual_wal_flush(manual_wal_flush);
+            }
+            if let Some(atomic_flush) = self.atomic_flush {
+                options.set_atomic_flush(atomic_flush);
+            }
+
+            Ok(options)
+        }
+
+        /// WriteOptions를 빌드합니다.
+        pub fn build_write_opt(&self) -> WriteOptions {
+            self.write_options
+                .as_ref()
+                .map(|cfg| cfg.build())
+                .unwrap_or_default()
+        }
+
+        /// ReadOptions를 빌드합니다.
+        pub fn build_read_opt(&self) -> ReadOptions {
+            self.read_options
+                .as_ref()
+                .map(|cfg| cfg.build())
+                .unwrap_or_default()
+        }
     }
 
     /// 일반 데이터베이스와 옵션을 생성하는 헬퍼 함수 (append-heavy + range scan 최적화)
@@ -40,6 +321,47 @@ pub mod config {
     impl IndexTTL {
         pub fn new(path: String) -> Self {
             Self(path)
+        }
+    }
+
+    #[derive(Clone)]
+    pub struct Loader(PathBuf, PathBuf, bool);
+    impl Loader {
+        pub fn new(path: PathBuf, cfg: PathBuf, create_if_missing: bool) -> Self {
+            Self(path, cfg, create_if_missing)
+        }
+    }
+
+    impl Generator for Loader {
+        fn generate(
+            &self,
+        ) -> anyhow::Result<(DBWithThreadMode<MultiThreaded>, WriteOptions, ReadOptions)> {
+            let Loader(db_path, cfg_path, create_if_missing) = self;
+            let cfg = serde_json::from_slice::<DBConfig>(&std::fs::read(cfg_path)?).unwrap();
+            let options = {
+                let mut options = cfg.build_db_opt()?;
+                options.create_if_missing(*create_if_missing);
+                options
+            };
+
+            let (filename, cfg_filename) =
+                db_path
+                    .file_name()
+                    .zip(cfg_path.file_name())
+                    .ok_or(anyhow::anyhow!(
+                        "DB path is not a file: {}",
+                        db_path.display()
+                    ))?;
+            let fullpath = format!(
+                "{}@{}",
+                filename.to_string_lossy(),
+                cfg_filename.to_string_lossy()
+            );
+
+            let db = DBWithThreadMode::<MultiThreaded>::open(&options, &fullpath)?;
+            let write_opts = cfg.build_write_opt();
+            let read_opts = cfg.build_read_opt();
+            Ok((db, write_opts, read_opts))
         }
     }
 

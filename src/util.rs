@@ -4,6 +4,7 @@ use chrono::{DateTime, Duration, TimeZone, Utc};
 use futures::Future;
 use ring::aead;
 use std::cmp::Ordering;
+use std::path::PathBuf;
 use zeroize::Zeroize;
 
 pub fn datetime_epoch_first() -> DateTime<Utc> {
@@ -16,10 +17,7 @@ pub fn datetime_from_millis(millis: i64) -> DateTime<Utc> {
     datetime_epoch_first() + Duration::milliseconds(millis)
 }
 
-pub fn datetime_floor(
-    datetime: &DateTime<Utc>,
-    by: &Duration,
-) -> anyhow::Result<DateTime<Utc>> {
+pub fn datetime_floor(datetime: &DateTime<Utc>, by: &Duration) -> anyhow::Result<DateTime<Utc>> {
     const SECONDS_IN_DAY: i64 = 24 * 60 * 60 * 1000; // 86400000 milliseconds
     let dur_ms = by.num_milliseconds();
     if dur_ms == 0 || SECONDS_IN_DAY % dur_ms != 0 {
@@ -164,4 +162,52 @@ where
     }
 
     Err(low)
+}
+
+/// 지정된 경로의 디렉토리를 지정된 깊이까지 나열합니다.
+///
+/// `path`: 탐색을 시작할 경로
+/// `lvl`: 탐색 깊이 (0이면 직접 하위 디렉토리만, 1이면 하위의 하위만만, 등)
+///
+/// # 예시
+/// ```
+/// // lvl 0: path 하위의 직접 디렉토리들만
+/// // lvl 1: path 하위 디렉토리들의 하위 디렉토리만
+/// ```
+pub async fn list_directories(path: &PathBuf, lvl: u32) -> anyhow::Result<Vec<PathBuf>> {
+    let metadata = tokio::fs::metadata(&path).await?;
+    if !metadata.is_dir() {
+        return Err(anyhow::anyhow!(
+            "Path is not a directory: {}",
+            path.display()
+        ));
+    }
+
+    if lvl == 0 {
+        // 직접 하위 디렉토리만 반환
+        let mut dirs = Vec::new();
+        let mut read_dir = tokio::fs::read_dir(&path).await?;
+        while let Some(entry) = read_dir.next_entry().await? {
+            let metadata = entry.metadata().await?;
+            if metadata.is_dir() {
+                dirs.push(entry.path());
+            }
+        }
+        return Ok(dirs);
+    }
+
+    // lvl > 0인 경우: 재귀적으로 하위 디렉토리들을 수집
+    let mut result = Vec::new();
+    let mut read_dir = tokio::fs::read_dir(&path).await?;
+    while let Some(entry) = read_dir.next_entry().await? {
+        let metadata = entry.metadata().await?;
+        if metadata.is_dir() {
+            let sub_path = entry.path();
+            // 다음 레벨로 재귀
+            let sub_dirs = Box::pin(list_directories(&sub_path, lvl - 1)).await?;
+            result.extend(sub_dirs);
+        }
+    }
+
+    Ok(result)
 }
