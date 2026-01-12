@@ -6,6 +6,7 @@ use std::sync::Arc;
 use tokio::sync::RwLock;
 
 use crate::anyhowln;
+use crate::config::Loader;
 
 use super::localdb::*;
 
@@ -21,27 +22,27 @@ use super::localdb::*;
 /// * `Ok(String)` - 생성된 폴더 경로
 /// * `Err(anyhow::Error)` - TTL이 86400초의 약수가 아닌 경우
 
-#[derive(Clone)]
-pub enum TimeWindowType {
-    General,
-    Log,
-}
+// #[derive(Clone)]
+// pub enum TimeWindowType {
+//     General,
+//     Log,
+// }
 
-impl TimeWindowType {
-    pub async fn make_db(&self, path: &str) -> anyhow::Result<LocalDB> {
-        match self {
-            TimeWindowType::General => LocalDB::new(config::General::new(path.to_string())).await,
-            TimeWindowType::Log => LocalDB::new(config::Log::new(path.to_string())).await,
-        }
-    }
-}
+// impl TimeWindowType {
+//     pub async fn make_db(&self, path: &str) -> anyhow::Result<LocalDB> {
+//         match self {
+//             TimeWindowType::General => LocalDB::new(config::General::new(path.to_string())).await,
+//             TimeWindowType::Log => LocalDB::new(config::Log::new(path.to_string())).await,
+//         }
+//     }
+// }
 
 #[derive(Clone)]
 pub struct TimeWindowDBConfig {
     pub base_path: String,
     pub ttl: Duration,
     pub delete_legacy: bool,
-    pub ty: TimeWindowType,
+    pub cfg: PathBuf,
 }
 
 impl TimeWindowDBConfig {
@@ -86,7 +87,7 @@ impl TimeWindowDBConfig {
         timestamp: &DateTime<Local>,
     ) -> anyhow::Result<(LocalDB, DateTime<Local>)> {
         let (path, folder_time) = self.get_folder_name(timestamp)?;
-        let db = self.ty.make_db(&path).await?;
+        let db = LocalDB::new(Loader::<crate::True>::new(PathBuf::from(path), self.cfg.clone())).await?;
         Ok((db, folder_time))
     }
 }
@@ -276,7 +277,7 @@ pub async fn test() -> anyhow::Result<()> {
         base_path: "/test/twdb".to_string(),
         ttl: Duration::seconds(5),
         delete_legacy: true,
-        ty: TimeWindowType::Log,
+        cfg: PathBuf::from("conf/log.json"),
     };
     let db = TimeWindowDB::new(test).await?;
     let mut src = Vec::<Test>::new();

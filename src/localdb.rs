@@ -9,11 +9,11 @@ use std::{path::Path, sync::Arc};
 use tokio::{sync::Mutex, task};
 
 pub mod config {
+    use super::*;
+
     use std::path::PathBuf;
 
-    use crate::Bool;
-
-    use super::*;
+    pub use crate::Bool;
 
     pub trait Generator {
         fn generate(
@@ -332,6 +332,30 @@ pub mod config {
         pub fn new(path: PathBuf, cfg: PathBuf) -> Self {
             Self(path, cfg, std::marker::PhantomData::<B>)
         }
+
+        pub fn parse_tag(path: &PathBuf, cfg_root: &PathBuf) -> anyhow::Result<Self> {
+            let (db_path, cfg_path) = if let Some((db_name, cfg_name)) =
+                path.file_stem().and_then(|stem| {
+                    stem.to_string_lossy()
+                        .split_once('@')
+                        .map(|(v1, v2)| (v1.to_string(), v2.to_string()))
+                }) {
+                let mut cfg_path = cfg_root.join(cfg_name);
+                cfg_path.add_extension("json");
+
+                let db_path = if let Some(parent) = path.parent() {
+                    parent.join(db_name)
+                } else {
+                    PathBuf::from(db_name)
+                };
+
+                (db_path, cfg_path)
+            } else {
+                return Err(anyhow::anyhow!("Invalid filename: {}", path.display()));
+            };
+
+            Ok(Self(db_path, cfg_path, std::marker::PhantomData::<B>))
+        }
     }
 
     impl<B: Bool> Generator for Loader<B> {
@@ -346,19 +370,21 @@ pub mod config {
                 options
             };
 
-            let (filename, cfg_filename) =
+            let (db_stem, cfg_stem) =
                 db_path
                     .file_name()
-                    .zip(cfg_path.file_name())
+                    .zip(cfg_path.file_stem())
                     .ok_or(anyhow::anyhow!(
                         "DB path is not a file: {}",
                         db_path.display()
                     ))?;
-            let fullpath = format!(
+            let filename = format!(
                 "{}@{}",
-                filename.to_string_lossy(),
-                cfg_filename.to_string_lossy()
+                db_stem.to_string_lossy(),
+                cfg_stem.to_string_lossy()
             );
+            let mut fullpath = db_path.clone();
+            fullpath.set_file_name(filename);
 
             let db = DBWithThreadMode::<MultiThreaded>::open(&options, &fullpath)?;
             let write_opts = cfg.build_write_opt();
