@@ -410,7 +410,7 @@ pub mod config {
             options.set_bytes_per_sync(1024 * 1024);
             options.set_write_buffer_size(64 * 1024 * 1024);
             options.set_max_write_buffer_number(3);
-            options.set_min_write_buffer_number_to_merge(2);
+            options.set_min_write_buffer_number_to_merge(1);
             options.set_max_bytes_for_level_base(256 * 1024 * 1024);
             options.set_target_file_size_base(64 * 1024 * 1024);
 
@@ -470,7 +470,7 @@ pub mod config {
             options.set_bytes_per_sync(1024 * 1024);
             options.set_write_buffer_size(64 * 1024 * 1024);
             options.set_max_write_buffer_number(3);
-            options.set_min_write_buffer_number_to_merge(2);
+            options.set_min_write_buffer_number_to_merge(1);
             options.set_max_bytes_for_level_base(256 * 1024 * 1024);
             options.set_target_file_size_base(64 * 1024 * 1024);
 

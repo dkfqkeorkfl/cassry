@@ -3,6 +3,7 @@ use keyed_lock::r#async::KeyedLock;
 use rocksdb::{IteratorMode, WriteBatch as RocksWriteBatch};
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
+use std::path::PathBuf;
 use std::sync::Arc;
 use std::usize;
 use tokio::task::{self, JoinHandle};
@@ -29,8 +30,8 @@ struct TTLIndex {
 }
 
 impl TTLIndex {
-    async fn new(path: String) -> anyhow::Result<Self> {
-        let db = LocalDB::new(config::IndexTTL::new(path)).await?;
+    async fn new(path: PathBuf) -> anyhow::Result<Self> {
+        let db = LocalDB::new(config::IndexTTL::new(path.to_string_lossy().to_string())).await?;
         Ok(Self { db: db.into() })
     }
 
@@ -333,13 +334,14 @@ impl LocalDBTTL {
     ///
     /// 백그라운드 태스크가 주기적으로 만료된 항목을 스캔하고 삭제합니다.
     pub async fn new(
-        path: String,
+        path: PathBuf,
+        cfg: PathBuf,
         interval: std::time::Duration,
         limit_scan: Option<usize>,
     ) -> anyhow::Result<Self> {
-        let index_path = format!("{}/index", path);
+        let index_path = path.join("index");
 
-        let access_db = LocalDB::new(config::General::new(path.clone())).await?;
+        let access_db = LocalDB::new(config::Loader::<crate::True>::new(path, cfg)).await?;
         let ttl_index = TTLIndex::new(index_path).await?;
 
         let context = Arc::new(Context {
@@ -636,7 +638,8 @@ pub async fn test() -> anyhow::Result<()> {
 
     let interval = std::time::Duration::from_secs(1);
     let db = LocalDBTTL::new(
-        "/test/localdb_ttl".to_string(),
+        PathBuf::from("/test/localdb_ttl"),
+        PathBuf::from("conf/general.json"),
         std::time::Duration::from_secs(1),
         None,
     )

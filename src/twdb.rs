@@ -39,7 +39,7 @@ use super::localdb::*;
 
 #[derive(Clone)]
 pub struct TimeWindowDBConfig {
-    pub base_path: String,
+    pub root: PathBuf,
     pub ttl: Duration,
     pub delete_legacy: bool,
     pub cfg: PathBuf,
@@ -49,7 +49,7 @@ impl TimeWindowDBConfig {
     fn get_folder_name(
         &self,
         timestamp: &DateTime<Local>,
-    ) -> anyhow::Result<(String, DateTime<Local>)> {
+    ) -> anyhow::Result<(PathBuf, DateTime<Local>)> {
         const SECONDS_IN_DAY: i64 = 24 * 60 * 60;
         let ttl_seconds = self.ttl.num_seconds();
 
@@ -73,11 +73,8 @@ impl TimeWindowDBConfig {
         let folder_time = midnight + folder_elapsed;
 
         Ok((
-            format!(
-                "{}/{}",
-                self.base_path,
-                folder_time.format("%Y%m%d-%H%M%S")
-            ),
+            self.root
+                .join(folder_time.format("%Y%m%d-%H%M%S").to_string()),
             folder_time,
         ))
     }
@@ -87,7 +84,7 @@ impl TimeWindowDBConfig {
         timestamp: &DateTime<Local>,
     ) -> anyhow::Result<(LocalDB, DateTime<Local>)> {
         let (path, folder_time) = self.get_folder_name(timestamp)?;
-        let db = LocalDB::new(Loader::<crate::True>::new(PathBuf::from(path), self.cfg.clone())).await?;
+        let db = LocalDB::new(Loader::<crate::True>::new(path, self.cfg.clone())).await?;
         Ok((db, folder_time))
     }
 }
@@ -274,7 +271,7 @@ pub async fn test() -> anyhow::Result<()> {
 
     let interval = std::time::Duration::from_secs(1);
     let test = TimeWindowDBConfig {
-        base_path: "/test/twdb".to_string(),
+        root: PathBuf::from("/test/twdb"),
         ttl: Duration::seconds(5),
         delete_legacy: true,
         cfg: PathBuf::from("conf/log.json"),
