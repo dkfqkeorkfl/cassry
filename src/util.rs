@@ -81,22 +81,13 @@ pub fn hmac_blake3_with_len(
 }
 
 pub fn decrypt_str_by_aes_gcm_128(
-    key: &[u8],
-    iv: &[u8],
+    key: &[u8;16],
+    iv: &[u8;12],
     mut cipher: Vec<u8>,
 ) -> anyhow::Result<secrecy::SecretString> {
-    // 2. 입력 유효성 검사
-    if key.len() != 16 {
-        return Err(crate::anyhowln!("AES-128 requires 16-byte key"));
-    }
-    if iv.len() != 12 {
-        return Err(crate::anyhowln!("GCM requires 12-byte nonce"));
-    }
-
-    // 4. 복호화
-    let nonce = aead::Nonce::try_assume_unique_for_key(&iv)
+    let nonce = aead::Nonce::try_assume_unique_for_key(iv.as_slice())
         .map_err(|_| crate::anyhowln!("Invalid nonce"))?;
-    let unbound_key = aead::UnboundKey::new(&aead::AES_128_GCM, &key)
+    let unbound_key = aead::UnboundKey::new(&aead::AES_128_GCM, key.as_slice())
         .map_err(|_| crate::anyhowln!("Invalid key"))?;
     let key = aead::LessSafeKey::new(unbound_key);
 
@@ -112,21 +103,14 @@ pub fn decrypt_str_by_aes_gcm_128(
 }
 
 pub fn encrypt_str_by_aes_gcm_128(
-    key: &[u8],
-    iv: &[u8],
+    key: &[u8;16],
+    iv: &[u8;12],
     plaintext: &str,
 ) -> anyhow::Result<Vec<u8>> {
-    if key.len() != 16 {
-        return Err(crate::anyhowln!("AES-128 requires 16-byte key"));
-    }
-    if iv.len() != 12 {
-        return Err(crate::anyhowln!("GCM requires 12-byte nonce"));
-    }
-
-    let nonce = aead::Nonce::try_assume_unique_for_key(&iv)
+    let nonce = aead::Nonce::try_assume_unique_for_key(iv.as_slice())
         .map_err(|_| crate::anyhowln!("Invalid nonce"))?;
 
-    let unbound_key = aead::UnboundKey::new(&aead::AES_128_GCM, &key)
+    let unbound_key = aead::UnboundKey::new(&aead::AES_128_GCM, key.as_slice())
         .map_err(|_| crate::anyhowln!("Invalid key"))?;
     let safe_key = aead::LessSafeKey::new(unbound_key);
 

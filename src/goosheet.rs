@@ -4,7 +4,7 @@ use jsonwebtoken;
 use reqwest;
 use secrecy::*;
 use serde::{de::DeserializeOwned, *};
-use zeroize::ZeroizeOnDrop;
+use zeroize::{Zeroize, ZeroizeOnDrop};
 
 #[derive(Deserialize, ZeroizeOnDrop)]
 pub struct AccountKey {
@@ -40,12 +40,34 @@ pub struct AccessToken {
     pub access_token: SecretString,
 }
 
+fn deserialize_trimmed_secret_string_vec_vec<'de, D>(
+    deserializer: D,
+) -> Result<Vec<Vec<SecretString>>, D::Error>
+where
+    D: Deserializer<'de>,
+{
+    let vec_vec_string: Vec<Vec<String>> = Vec::deserialize(deserializer)?;
+    Ok(vec_vec_string
+        .into_iter()
+        .map(|row| {
+            row.into_iter()
+                .map(|mut s| {
+                    let result = SecretString::new(s.trim().into());
+                    s.zeroize();
+                    result
+                })
+                .collect()
+        })
+        .collect())
+}
+
 #[derive(Deserialize, ZeroizeOnDrop)]
 pub struct SheetValue {
     pub range: String,
     #[serde(rename = "majorDimension")]
     pub major_dimension: String,
 
+    #[serde(deserialize_with = "deserialize_trimmed_secret_string_vec_vec")]
     pub values: Vec<Vec<SecretString>>,
 }
 
