@@ -11,6 +11,8 @@ use tokio::{sync::Mutex, task};
 pub mod config {
     use std::path::PathBuf;
 
+    use crate::Bool;
+
     use super::*;
 
     pub trait Generator {
@@ -325,22 +327,22 @@ pub mod config {
     }
 
     #[derive(Clone)]
-    pub struct Loader(PathBuf, PathBuf, bool);
-    impl Loader {
-        pub fn new(path: PathBuf, cfg: PathBuf, create_if_missing: bool) -> Self {
-            Self(path, cfg, create_if_missing)
+    pub struct Loader<B: Bool>(PathBuf, PathBuf, std::marker::PhantomData<B>);
+    impl<B: Bool> Loader<B> {
+        pub fn new(path: PathBuf, cfg: PathBuf) -> Self {
+            Self(path, cfg, std::marker::PhantomData::<B>)
         }
     }
 
-    impl Generator for Loader {
+    impl<B: Bool> Generator for Loader<B> {
         fn generate(
             &self,
         ) -> anyhow::Result<(DBWithThreadMode<MultiThreaded>, WriteOptions, ReadOptions)> {
-            let Loader(db_path, cfg_path, create_if_missing) = self;
+            let Loader(db_path, cfg_path, _) = self;
             let cfg = serde_json::from_slice::<DBConfig>(&std::fs::read(cfg_path)?).unwrap();
             let options = {
                 let mut options = cfg.build_db_opt()?;
-                options.create_if_missing(*create_if_missing);
+                options.create_if_missing(B::as_bool());
                 options
             };
 

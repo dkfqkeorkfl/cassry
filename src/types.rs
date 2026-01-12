@@ -37,3 +37,21 @@ impl<T> Arithmetic for T where
     T: Add<Output = T> + Sub<Output = T> + Mul<Output = T> + Div<Output = T> + Copy
 {
 }
+
+pub trait Bool {
+    fn as_bool() -> bool;
+}
+
+pub struct True;
+impl Bool for True {
+    fn as_bool() -> bool {
+        true
+    }
+}
+
+pub struct False;
+impl Bool for False {
+    fn as_bool() -> bool {
+        false
+    }
+}
