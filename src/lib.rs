@@ -131,6 +131,17 @@ macro_rules! anyhowln {
         anyhow::anyhow!("{}", formatted)
     })
 }
+
+#[macro_export]
+macro_rules! cleanup {
+    ($job:expr, $cleanup:block) => {{
+        let __result = $job.await;
+        $cleanup;
+        __result
+    }};
+}
+
+
 // fn maybe_send_to_slack(level: &str, msg: &str) {
 //     if level == "ERROR" {  // For example, only send errors to Slack
 //         let slack_message = format!("[{}]: {}", level, msg);
