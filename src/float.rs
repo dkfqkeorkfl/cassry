@@ -43,9 +43,9 @@ pub fn to_decimal_with_json(v: &serde_json::Value) -> anyhow::Result<rust_decima
     }
 }
 
-#[derive(Default, Debug, Clone)]
+#[derive(Default, Debug)]
 pub struct LazyDecimal {
-    number: Arc<RwLock<Option<Decimal>>>,
+    number: RwLock<Option<Decimal>>,
     string: String,
 }
 pub type LazyDecimalPtr = Arc<LazyDecimal>;
@@ -79,7 +79,7 @@ impl<'de> Deserialize<'de> for LazyDecimal {
     {
         let str: String = Deserialize::deserialize(deserializer)?;
         Ok(LazyDecimal {
-            number: Arc::new(RwLock::new(None)),
+            number: RwLock::new(None),
             string: str,
         })
     }
@@ -91,7 +91,7 @@ impl LazyDecimal {
     /// 이 함수는 10진수를 문자열로 변환하는 데 따른 오버헤드를 발생시키지 않습니다.
     pub fn new(str: String) -> Self {
         Self {
-            number: Arc::new(RwLock::new(None)),
+            number: RwLock::new(None),
             string: str,
         }
     }
@@ -102,7 +102,7 @@ impl LazyDecimal {
     /// Consider using `new_with_strings` if you already have string representations.
     pub fn new_with_decimal(num: Decimal) -> Self {
         Self {
-            number: Arc::new(Some(num).into()),
+            number: RwLock::new(Some(num)),
             string: num.to_string(),
         }
     }
@@ -127,7 +127,7 @@ impl LazyDecimal {
         }
     }
 
-    pub fn string(&self) -> &String {
+    pub fn string(&self) -> &str {
         &self.string
     }
 }
