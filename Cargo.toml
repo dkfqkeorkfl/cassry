@@ -42,7 +42,6 @@ blake3 = "1.8"
 secrecy = { version = "0.10", features = ["serde"] }
 zeroize = { version = "1", features = ["serde", "zeroize_derive"] }
 
-once_cell = "1"
 log = "0.4"
 log4rs = "1"
 futures = "0.3"

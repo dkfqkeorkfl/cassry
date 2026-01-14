@@ -205,3 +205,40 @@ pub mod postcard_base64 {
             .map_err(|e| D::Error::custom(format!("postcard deserialization failed: {}", e)))
     }
 }
+
+/// 문자열을 trim하여 직렬화/역직렬화하는 모듈
+///
+/// 사용 예시:
+/// ```rust
+/// #[derive(Serialize, Deserialize)]
+/// struct Example {
+///     #[serde(
+///         serialize_with = "cassry::serialization::string_trim::serialize",
+///         deserialize_with = "cassry::serialization::string_trim::deserialize"
+///     )]
+///     name: String,
+/// }
+/// ```
+pub mod string_trim {
+    use serde::{Deserialize, Deserializer, Serializer};
+
+    /// 문자열을 직렬화하기 전에 `trim()`을 적용합니다.
+    ///
+    /// `&String` 필드에도 사용할 수 있도록, 인자는 `&str`로 받습니다.
+    pub fn serialize<S>(value: &str, serializer: S) -> Result<S::Ok, S::Error>
+    where
+        S: Serializer,
+    {
+        let trimmed = value.trim();
+        serializer.serialize_str(trimmed)
+    }
+
+    /// 역직렬화된 문자열에 `trim()`을 적용하여 `String`으로 반환합니다.
+    pub fn deserialize<'de, D>(deserializer: D) -> Result<String, D::Error>
+    where
+        D: Deserializer<'de>,
+    {
+        let s = String::deserialize(deserializer)?;
+        Ok(s.trim().to_string())
+    }
+}

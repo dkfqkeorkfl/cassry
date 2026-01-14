@@ -1,3 +1,5 @@
+use std::sync::LazyLock;
+
 pub use tokio;
 
 pub use serde;
@@ -10,7 +12,6 @@ pub use chrono;
 pub use anyhow;
 pub use futures;
 
-pub use once_cell;
 pub use hex;
 pub use jsonwebtoken;
 pub use ring;
@@ -49,8 +50,7 @@ pub use log::Level as LogLvl;
 pub use log::LevelFilter as LogLvlFilter;
 // pub use rust_decimal::Decimal;
 
-static SLACK: once_cell::sync::Lazy<slack::Slack> =
-    once_cell::sync::Lazy::new(|| slack::Slack::default());
+static SLACK: LazyLock<slack::Slack> = LazyLock::new(|| slack::Slack::default());
 
 pub async fn init(
     path: &str,
