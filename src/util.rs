@@ -5,6 +5,7 @@ use futures::Future;
 use ring::aead;
 use std::cmp::Ordering;
 use std::path::PathBuf;
+use std::time::SystemTime;
 use zeroize::Zeroize;
 
 pub fn datetime_epoch_first() -> DateTime<Utc> {
@@ -27,6 +28,18 @@ pub fn datetime_floor(datetime: &DateTime<Utc>, by: &Duration) -> anyhow::Result
     let floored_timestamp = (seconds / dur_ms) * dur_ms;
     let floored_time = Utc.timestamp_opt(floored_timestamp, 0).unwrap();
     Ok(floored_time)
+}
+
+pub fn datetime_from_uuid7(uuid: uuid::Uuid) -> Option<DateTime<Utc>> {
+    let tp = uuid.get_timestamp()?;
+    let st : SystemTime = tp.into();
+    Some(DateTime::<Utc>::from(st))
+}
+
+pub fn datetime_to_uuid7(datetime: DateTime<Utc>) -> anyhow::Result<uuid::Uuid> {
+    let st : SystemTime = datetime.into();
+    let ts = uuid::Timestamp::try_from(st)?;
+    Ok(uuid::Uuid::new_v7(ts))
 }
 
 pub fn verify_password(origin: &str, hashed: &str) -> anyhow::Result<()> {

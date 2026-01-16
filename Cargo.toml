@@ -49,3 +49,4 @@ hex = "0.4"
 base64 = "0.22"
 regex = "1"
 keyed-lock = { version = "0.2", features = ["async"] }
+uuid = { version = "1", features = ["v7", "serde"] }

@@ -25,6 +25,7 @@ pub use rocksdb;
 pub use blake3;
 pub use base64;
 pub use keyed_lock;
+pub use uuid;
 
 pub mod cache;
 pub mod cache_customed;
