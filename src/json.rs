@@ -1,7 +1,7 @@
 use anyhow::*;
 use serde::Serialize;
 
-pub fn url_encode_object<T: Serialize>(v: &T) -> Result<String> {
+pub fn url_encode_object(v: &impl Serialize) -> Result<String> {
     let v = serde_json::to_value(v)?;
     url_encode(&v)
 }
