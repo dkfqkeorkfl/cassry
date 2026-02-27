@@ -8,6 +8,25 @@ use std::path::PathBuf;
 use std::time::SystemTime;
 use zeroize::Zeroize;
 
+pub async fn shutdown_signal() -> Result<(), std::io::Error> {
+    let ctrl_c = async {
+        tokio::signal::ctrl_c()
+            .await
+    };
+    #[cfg(unix)]
+    let terminate = async {
+        tokio::signal::unix::signal(tokio::signal::unix::SignalKind::terminate())?
+            .recv()
+            .await;
+        Ok(())
+    };
+    #[cfg(not(unix))]
+    let terminate = std::future::pending::<Result<(), std::io::Error>>();
+
+    tokio::select! { result = ctrl_c => result?, result = terminate => result? }
+    Ok(())
+}
+
 pub fn datetime_epoch_first() -> DateTime<Utc> {
     Utc.timestamp_opt(0, 0).unwrap()
 }
