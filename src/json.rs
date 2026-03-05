@@ -17,7 +17,6 @@ pub fn url_encode(v: &serde_json::Value) -> Result<String> {
                 _ => value.to_string(),
             };
 
-
             // 이진 탐색으로 삽입 위치 찾기
             let pos = sorted_vec
                 .binary_search_by(|(k, _)| (*k).cmp(key.as_str()))
@@ -29,5 +28,33 @@ pub fn url_encode(v: &serde_json::Value) -> Result<String> {
         return Ok(encoded);
     }
 
-    return Err(crate::anyhowln!("invalid param"));
+    Err(crate::anyhowln!("invalid param"))
+}
+
+pub fn urlencode_for_sign(v: &serde_json::Map<String, serde_json::Value>) -> Result<String> {
+    let query = v
+        .iter()
+        .map(|(k, v)| {
+            let val_str = match v {
+                serde_json::Value::String(s) => s.clone(),
+                _ => v.to_string(),
+            };
+            format!(
+                "{}={}",
+                urlencoding::encode(k),
+                urlencoding::encode(&val_str)
+            )
+        })
+        .collect::<Vec<_>>()
+        .join("&");
+    Ok(query)
+}
+
+pub fn urlencode_for_sign_vec(v: Vec<(&str, &str)>) -> Result<String> {
+    let query = v
+        .iter()
+        .map(|(k, v)| format!("{}={}", urlencoding::encode(k), urlencoding::encode(v)))
+        .collect::<Vec<_>>()
+        .join("&");
+    Ok(query)
 }

@@ -16,7 +16,9 @@ before-build = true
 # below are dependencies should be imported each project
 serde = { version = "1", features = ["derive", "rc"] }
 
-serde_json = "1"
+# preserve_order 피쳐는 nodejs처럼 삽입순으로 json을 사용하게 됨 일반적으로 btree가 빠르지만 bson가 기본적으로 이 피쳐를 사용하여 혼란을 방지하기 위하여 표준화
+# 만약 빠른 json을 이용해야한다면 다른 json을 고려해야함
+serde_json = {version = "1", features = ["preserve_order"]}
 serde_urlencoded = "0.7"
 serde_with = { version = "3", features = ["chrono_0_4", "base64", "hex"] }
 derive_more = { version = "2", features = ["full"] }
@@ -36,6 +38,7 @@ chrono = { version = "0.4", features = ["serde"] }
 rust_decimal = { version = "1", features = ["maths", "rand", "rust-fuzz"] }
 moka = { version = "0.12", features = ["future"] }
 
+urlencoding = "2"
 jsonwebtoken = { version = "10", features = ["aws_lc_rs"] }
 ring = "0.17"
 argon2 = "0.5"

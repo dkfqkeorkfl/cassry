@@ -2,61 +2,59 @@ use std::sync::LazyLock;
 
 pub use tokio;
 
+pub use postcard;
 pub use serde;
 pub use serde_json;
 pub use serde_urlencoded;
-pub use postcard;
 
-pub use reqwest;
-pub use chrono;
 pub use anyhow;
+pub use chrono;
 pub use futures;
+pub use reqwest;
 
+pub use argon2;
+pub use base64;
+pub use blake3;
 pub use hex;
 pub use jsonwebtoken;
-pub use ring;
-pub use argon2;
-pub use rust_decimal;
-pub use regex;
-pub use secrecy;
-pub use zeroize;
-pub use moka;
-pub use rocksdb;
-pub use blake3;
-pub use base64;
 pub use keyed_lock;
+pub use moka;
+pub use regex;
+pub use ring;
+pub use rocksdb;
+pub use rust_decimal;
+pub use secrecy;
 pub use uuid;
+pub use zeroize;
 
 pub mod cache;
 pub mod cache_customed;
+pub mod float;
 pub mod json;
 pub mod localdb;
 pub mod localdb_ttl;
+pub mod peak_timer;
+pub mod secret_loader;
 pub mod slack;
+pub mod timelimiter;
 pub mod types;
 pub mod util;
-pub mod float;
-pub mod timelimiter;
-pub mod secret_loader;
 
-pub mod twdb;
 pub mod goosheet;
 pub mod serialization;
+pub mod twdb;
 
-pub use float::*;
 pub use cache::*;
+pub use float::*;
 pub use localdb::*;
-pub use types::*;
 pub use log::Level as LogLvl;
 pub use log::LevelFilter as LogLvlFilter;
+pub use types::*;
 // pub use rust_decimal::Decimal;
 
 static SLACK: LazyLock<slack::Slack> = LazyLock::new(|| slack::Slack::default());
 
-pub async fn init(
-    path: &str,
-    slack: slack::SlackParams
-) -> anyhow::Result<()> {
+pub async fn init(path: &str, slack: slack::SlackParams) -> anyhow::Result<()> {
     SLACK.init(slack).await;
     log4rs::init_file(path, Default::default())
 }
@@ -141,7 +139,6 @@ macro_rules! cleanup {
         __result
     }};
 }
-
 
 // fn maybe_send_to_slack(level: &str, msg: &str) {
 //     if level == "ERROR" {  // For example, only send errors to Slack
