@@ -1,5 +1,3 @@
-use std::sync::LazyLock;
-
 pub use tokio;
 
 pub use postcard;
@@ -47,39 +45,30 @@ pub mod twdb;
 pub use cache::*;
 pub use float::*;
 pub use localdb::*;
-pub use log::Level as LogLvl;
-pub use log::LevelFilter as LogLvlFilter;
 pub use types::*;
 // pub use rust_decimal::Decimal;
 
-static SLACK: LazyLock<slack::Slack> = LazyLock::new(|| slack::Slack::default());
-
-pub async fn init(path: &str, slack: slack::SlackParams) -> anyhow::Result<()> {
-    SLACK.init(slack).await;
-    log4rs::init_file(path, Default::default())
-}
-
 pub mod _private_logger {
     pub fn trace(msg: String) {
-        log::trace!("{}", msg);
+        tracing::trace!("{}", msg);
     }
 
     pub fn debug(msg: String) {
-        log::debug!("{}", msg);
+        tracing::debug!("{}", msg);
     }
 
     pub fn info(msg: String) {
-        log::info!("{}", msg);
+        tracing::info!("{}", msg);
     }
 
     pub fn warn(msg: String) {
-        log::warn!("{}", msg);
-        crate::SLACK.put(log::Level::Warn, msg);
+        tracing::warn!("{}", msg);
+        // crate::SLACK.put(log::Level::Warn, msg);
     }
 
     pub fn error(msg: String) {
-        log::error!("{}", msg);
-        crate::SLACK.put(log::Level::Error, msg);
+        tracing::error!("{}", msg);
+        // crate::SLACK.put(log::Level::Error, msg);
     }
 }
 

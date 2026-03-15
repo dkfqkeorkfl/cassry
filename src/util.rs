@@ -6,13 +6,55 @@ use ring::aead;
 use std::cmp::Ordering;
 use std::path::PathBuf;
 use std::time::SystemTime;
+use tracing_subscriber::{fmt, prelude::*, EnvFilter};
 use zeroize::Zeroize;
 
+pub fn init_tracing(
+    path: std::path::PathBuf,
+    default_filter: &str,
+) -> anyhow::Result<tracing_appender::non_blocking::WorkerGuard> {
+    let (parent, file_name) = path
+        .parent()
+        .zip(path.file_name())
+        .ok_or(anyhow::anyhow!("path is not valid"))?;
+
+    // 1) 파일 롤링 (daily)
+    let file_appender = tracing_appender::rolling::daily(parent, file_name);
+    let (non_blocking, guard) = tracing_appender::non_blocking(file_appender);
+    // std::mem::forget(guard); // 프로세스 종료까지 writer worker 유지
+
+    // 2) JSON 로그 레이어 (파일로 저장)
+    let json_layer = fmt::layer()
+        .json()
+        .with_span_list(true) // span stack 출력
+        .with_current_span(true) // 현재 span 출력
+        .with_writer(non_blocking);
+
+    // 3) 콘솔 pretty 로그 레이어 (with_current_span은 JSON 레이어 전용)
+    let console_layer = fmt::layer()
+        .pretty()
+        .with_target(false)
+        .with_file(true)
+        .with_line_number(true)
+        .with_thread_ids(true)
+        .with_span_events(fmt::format::FmtSpan::CLOSE); // span close 시 duration 출력
+
+    // 4) 환경 변수 기반 필터 (RUST_LOG)
+    let filter =
+        EnvFilter::try_from_default_env().unwrap_or_else(|_| EnvFilter::new(default_filter));
+
+    // 5) 최종 subscriber 구성
+    tracing_subscriber::registry()
+        .with(filter)
+        .with(console_layer)
+        .with(json_layer)
+        .init();
+
+    Ok(guard)
+}
+
 pub async fn shutdown_signal() -> Result<(), std::io::Error> {
-    let ctrl_c = async {
-        tokio::signal::ctrl_c()
-            .await
-    };
+    let ctrl_c = async { tokio::signal::ctrl_c().await };
     #[cfg(unix)]
     let terminate = async {
         tokio::signal::unix::signal(tokio::signal::unix::SignalKind::terminate())?
@@ -51,12 +93,12 @@ pub fn datetime_floor(datetime: &DateTime<Utc>, by: &Duration) -> anyhow::Result
 
 pub fn datetime_from_uuid7(uuid: uuid::Uuid) -> Option<DateTime<Utc>> {
     let tp = uuid.get_timestamp()?;
-    let st : SystemTime = tp.into();
+    let st: SystemTime = tp.into();
     Some(DateTime::<Utc>::from(st))
 }
 
 pub fn datetime_to_uuid7(datetime: DateTime<Utc>) -> anyhow::Result<uuid::Uuid> {
-    let st : SystemTime = datetime.into();
+    let st: SystemTime = datetime.into();
     let ts = uuid::Timestamp::try_from(st)?;
     Ok(uuid::Uuid::new_v7(ts))
 }
@@ -113,8 +155,8 @@ pub fn hmac_blake3_with_len(
 }
 
 pub fn decrypt_str_by_aes_gcm_128(
-    key: &[u8;16],
-    iv: &[u8;12],
+    key: &[u8; 16],
+    iv: &[u8; 12],
     mut cipher: Vec<u8>,
 ) -> anyhow::Result<secrecy::SecretString> {
     let nonce = aead::Nonce::try_assume_unique_for_key(iv.as_slice())
@@ -135,8 +177,8 @@ pub fn decrypt_str_by_aes_gcm_128(
 }
 
 pub fn encrypt_str_by_aes_gcm_128(
-    key: &[u8;16],
-    iv: &[u8;12],
+    key: &[u8; 16],
+    iv: &[u8; 12],
     plaintext: &str,
 ) -> anyhow::Result<Vec<u8>> {
     let nonce = aead::Nonce::try_assume_unique_for_key(iv.as_slice())

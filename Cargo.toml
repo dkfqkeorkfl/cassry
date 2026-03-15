@@ -36,7 +36,10 @@ rocksdb = { version = "0.24", features = ["multi-threaded-cf", "serde1", "lz4", 
 anyhow = "1"
 chrono = { version = "0.4", features = ["serde"] }
 rust_decimal = { version = "1", features = ["maths", "rand", "rust-fuzz"] }
-moka = { version = "0.12", features = ["future"] }
+
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter", "json"] }
+tracing-appender = "0.2"
 
 urlencoding = "2"
 jsonwebtoken = { version = "10", features = ["aws_lc_rs"] }
@@ -47,11 +50,11 @@ blake3 = "1.8"
 secrecy = { version = "0.10", features = ["serde"] }
 zeroize = { version = "1", features = ["serde", "zeroize_derive"] }
 
-log = "0.4"
-log4rs = "1"
+
 futures = "0.3"
 hex = "0.4"
 base64 = "0.22"
 regex = "1"
 keyed-lock = { version = "0.2", features = ["async"] }
 uuid = { version = "1", features = ["v7", "serde"] }
+moka = { version = "0.12", features = ["future"] }
