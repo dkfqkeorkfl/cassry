@@ -301,10 +301,10 @@ pub mod config {
     }
 
     /// 일반 데이터베이스와 옵션을 생성하는 헬퍼 함수 (append-heavy + range scan 최적화)
-    pub struct General(String);
+    pub struct General(PathBuf);
     impl General {
-        pub fn new(path: String) -> Self {
-            Self(path)
+        pub fn new(path: impl Into<PathBuf>) -> Self {
+            Self(path.into())
         }
     }
 
