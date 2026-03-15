@@ -60,7 +60,7 @@ pub async fn shutdown_signal() -> Result<(), std::io::Error> {
         tokio::signal::unix::signal(tokio::signal::unix::SignalKind::terminate())?
             .recv()
             .await;
-        Ok(())
+        Ok::<(), std::io::Error>(())
     };
     #[cfg(not(unix))]
     let terminate = std::future::pending::<Result<(), std::io::Error>>();
