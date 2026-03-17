@@ -3,7 +3,6 @@ pub use tokio;
 pub use postcard;
 pub use serde;
 pub use serde_json;
-pub use serde_urlencoded;
 
 pub use anyhow;
 pub use chrono;
